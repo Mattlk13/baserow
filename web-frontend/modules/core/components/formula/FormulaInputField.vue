@@ -323,7 +323,8 @@ export default {
             this.isFocused = val
           },
           getRootEl: () => this.$el,
-          getContextEl: () => this.$refs.formulaInputExplorerContext?.$el,
+          getContextEl: () =>
+            this.$refs.formulaInputExplorerContext?.getTeleportedElement(),
           showExplorerContextMenu: () => {
             this.$nextTick(() => {
               if (!this.isFocused) return
@@ -586,8 +587,9 @@ export default {
 
       if (config.needsDynamicOffset) {
         const inputRect = this.$el?.getBoundingClientRect()
-        const contextRect =
-          this.$refs.formulaInputExplorerContext?.$el?.getBoundingClientRect()
+        const contextRect = this.$refs.formulaInputExplorerContext
+          ?.getTeleportedElement()
+          ?.getBoundingClientRect()
 
         switch (this.contextPosition) {
           case 'left':

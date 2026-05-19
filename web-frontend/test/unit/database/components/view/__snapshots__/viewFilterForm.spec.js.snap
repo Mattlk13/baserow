@@ -1106,6 +1106,8 @@ exports[`ViewFilterForm match snapshots > Full view filter component 1`] = `
     
     
     
+    
+    
   </div>
   <div
     class="context__footer"
@@ -1602,6 +1604,8 @@ exports[`ViewFilterForm match snapshots > rating filter 1`] = `
         </div>
       </div>
     </div>
+    
+    
     
     
     

@@ -3,6 +3,7 @@ import EnterpriseFeatures from '@baserow_enterprise/features'
 import PaidFeaturesModal from '@baserow_premium/components/PaidFeaturesModal'
 import { RBACPaidFeature } from '@baserow_enterprise/paidFeatures'
 import { FormViewType } from '@baserow/modules/database/viewTypes.js'
+import RestrictedViewFilterContext from '@baserow_enterprise/components/views/RestrictedViewFilterContext'
 
 export class RestrictedViewOwnershipType extends ViewOwnershipType {
   static getType() {
@@ -81,6 +82,19 @@ export class RestrictedViewOwnershipType extends ViewOwnershipType {
     // list all the fields of the table. If the view param is added, it will only list
     // the fields related to this view.
     return !canListFields
+  }
+
+  getFilterContextComponent(view, database) {
+    if (
+      !this.app.$hasPermission(
+        'database.table.view.update_default_values',
+        view,
+        database.workspace.id
+      )
+    ) {
+      return null
+    }
+    return RestrictedViewFilterContext
   }
 
   _canUpdateFieldOptions(view, database) {

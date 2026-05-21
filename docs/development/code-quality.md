@@ -10,22 +10,87 @@ If you have the [development environment](./running-the-dev-env-locally.md) up a
 you can easily run the linters using [just](./justfile.md) commands.
 
 **Backend (from project root or `backend/` directory):**
-* `just b format`: auto format all Python code using black.
-* `just b sort`: sort imports using isort.
-* `just b fix`: run both format and sort.
-* `just b lint`: check Python code with flake8, black, isort, and bandit.
+
+- `just b format`: auto-format all Python code using Ruff formatter.
+- `just b fix`: run Ruff checks with automatic fixes and format Python code.
+- `just b lint`: check Python code with Ruff.
 
 **Frontend (from project root or `web-frontend/` directory):**
-* `just f lint`: check JavaScript with eslint and SCSS with stylelint.
-* `just f fix`: auto-fix code style issues.
+
+- `just f lint`: check JavaScript and SCSS files with ESLint and Stylelint.
+- `just f fix`: auto-fix code style issues.
 
 ## Running tests
 
 There are also commands to easily run the tests.
 
-* `just b test` (backend): run all backend Python tests with pytest.
-* `just b test -n=auto` (backend): run tests in parallel for faster execution.
-* `just f test` (frontend): run all frontend tests with Jest.
+- `just b test` (backend): run all backend Python tests with pytest.
+- `just b test -n=auto` (backend): run tests in parallel for faster execution.
+- `just f test` (frontend): run all frontend tests with Jest.
+
+## Git pre-commit hooks
+
+Baserow uses [`pre-commit`](https://pre-commit.com/) to automatically run linters and
+formatters before commits are created. This ensures your changes comply with repo-wide
+code quality rules without waiting for CI feedback.
+
+The lint/format hooks delegate to the same `just b fix` and `just f fix` recipes used
+by CI and manual runs, so pre-commit will never produce changes that differ from
+running `just fix` yourself.
+
+### Installation
+
+To set up the pre-commit hooks locally in your `.git/` folder, run the following command from the repository root:
+
+```bash
+just pre-commit-install
+```
+
+This registers a few general hygiene hooks (YAML syntax checks, merge-conflict
+markers, large files) plus the backend and frontend lint/format hooks. Trailing
+whitespace and end-of-file fixes are intentionally left to `ruff`/`prettier` to
+avoid touching legacy files.
+
+To remove the hooks again:
+
+```bash
+just pre-commit-uninstall
+```
+
+### Running manually
+
+You can also run pre-commit manually at any time against all files or staged changes:
+
+```bash
+# Run against all files
+just b run pre-commit run --all-files
+
+# Run against specific files
+just b run pre-commit run --files path/to/file1.py path/to/file2.js
+```
+
+#### Tip: lint everything you've touched on this branch
+
+A normal `git commit` runs the hooks on **staged files only**, and `pre-commit run`
+with no arguments does the same. To lint every file you have changed relative to
+`HEAD` (staged *and* unstaged), pass the diff explicitly:
+
+```bash
+just b run pre-commit run --files $(git diff --name-only HEAD)
+```
+
+This is handy before opening a pull request: it scopes the run to your
+work-in-progress without re-linting the entire monorepo the way
+`--all-files` does. Swap `HEAD` for a base ref (for example `origin/develop`) to
+lint everything your branch changes:
+
+```bash
+just b run pre-commit run --files $(git diff --name-only origin/develop...HEAD)
+```
+
+See the [pre-commit documentation](https://pre-commit.com/#usage) for more advanced
+usage (skipping hooks for a commit, running a single hook, updating hook versions,
+etc.).
 
 ## Continuous integration
 

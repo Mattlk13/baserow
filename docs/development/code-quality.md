@@ -11,14 +11,49 @@ you can easily run the linters using [just](./justfile.md) commands.
 
 **Backend (from project root or `backend/` directory):**
 
-- `just b format`: auto-format all Python code using Ruff formatter.
 - `just b fix`: run Ruff checks with automatic fixes and format Python code.
-- `just b lint`: check Python code with Ruff.
+  Aliases: `just b format`, `just b f`.
+- `just b lint`: check Python code with Ruff. Alias: `just b check`, `just b l`.
 
 **Frontend (from project root or `web-frontend/` directory):**
 
-- `just f lint`: check JavaScript and SCSS files with ESLint and Stylelint.
-- `just f fix`: auto-fix code style issues.
+- `just f lint`: check the frontend trees with ESLint (JS/TS/Vue), Stylelint
+  (SCSS), and Prettier (also CSS/JSON/Markdown/HTML/YAML).
+- `just f fix`: auto-fix issues with the same tools.
+
+All of the above accept an optional list of file paths and restrict the run to
+just those files:
+
+```bash
+just b fix backend/src/baserow/core/utils.py
+just f fix web-frontend/modules/core/jobTypes.js
+```
+
+A few things to know when passing paths:
+
+- **Paths must be repo-root-relative** (for example `backend/src/baserow/...`,
+  not `src/baserow/...`), even when you invoke the recipe from inside
+  `backend/` or `web-frontend/`. This keeps the behavior identical regardless
+  of where you run it from and matches what `pre-commit` passes in.
+- Paths outside the linted trees (`backend/{src,tests}`,
+  `{premium,enterprise}/backend/{src,tests}`, `web-frontend/`,
+  `{premium,enterprise}/web-frontend/`) are silently skipped, as are files with
+  extensions the tools don't handle. This lets you pipe in a mixed file list
+  without filtering it yourself.
+- **With no arguments each recipe lints its full component tree** (`just b`
+  walks all backend trees, `just f` walks all frontend trees; running both
+  covers the monorepo). This matters when you scope to a diff with `$(...)`
+  — if the diff is empty, the expansion produces no arguments and you'll
+  accidentally trigger a full-tree run. Guard the call when scripting:
+
+  ```bash
+  # Scope to your branch's changes, skipping the run if nothing changed:
+  files=$(git diff --name-only origin/develop...HEAD)
+  if [ -n "$files" ]; then
+      just b fix $files
+      just f fix $files
+  fi
+  ```
 
 ## Running tests
 
@@ -26,7 +61,7 @@ There are also commands to easily run the tests.
 
 - `just b test` (backend): run all backend Python tests with pytest.
 - `just b test -n=auto` (backend): run tests in parallel for faster execution.
-- `just f test` (frontend): run all frontend tests with Jest.
+- `just f test` (frontend): run all frontend tests with Vitest.
 
 ## Git pre-commit hooks
 
@@ -73,7 +108,7 @@ just b run pre-commit run --files path/to/file1.py path/to/file2.js
 
 A normal `git commit` runs the hooks on **staged files only**, and `pre-commit run`
 with no arguments does the same. To lint every file you have changed relative to
-`HEAD` (staged *and* unstaged), pass the diff explicitly:
+`HEAD` (staged _and_ unstaged), pass the diff explicitly:
 
 ```bash
 just b run pre-commit run --files $(git diff --name-only HEAD)
@@ -86,6 +121,20 @@ lint everything your branch changes:
 
 ```bash
 just b run pre-commit run --files $(git diff --name-only origin/develop...HEAD)
+```
+
+If you only want to run the Ruff or ESLint/Stylelint/Prettier steps (and skip the
+ancillary pre-commit hooks like `check-yaml`), call the `just` recipes directly
+with the same file list — they accept a list of paths and route each file to the
+appropriate tool. Remember to guard against an empty diff, otherwise an empty
+expansion will lint the whole monorepo:
+
+```bash
+files=$(git diff --name-only origin/develop...HEAD)
+if [ -n "$files" ]; then
+    just b fix $files
+    just f fix $files
+fi
 ```
 
 See the [pre-commit documentation](https://pre-commit.com/#usage) for more advanced

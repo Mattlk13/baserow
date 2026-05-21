@@ -67,6 +67,8 @@ from baserow.contrib.database.views.operations import (
     ListViewsOperationType,
     ListViewSortOperationType,
     OrderViewsOperationType,
+    PrioritizeViewGroupByOperationType,
+    PrioritizeViewSortOperationType,
     ReadAggregationsViewOperationType,
     ReadViewDecorationOperationType,
     ReadViewFieldOptionsOperationType,
@@ -128,11 +130,13 @@ from .exceptions import (
     ViewGroupByDoesNotExist,
     ViewGroupByFieldAlreadyExist,
     ViewGroupByFieldNotSupported,
+    ViewGroupByNotInView,
     ViewGroupByNotSupported,
     ViewNotInTable,
     ViewSortDoesNotExist,
     ViewSortFieldAlreadyExist,
     ViewSortFieldNotSupported,
+    ViewSortNotInView,
     ViewSortNotSupported,
 )
 from .models import (
@@ -176,9 +180,11 @@ from .signals import (
     view_group_by_created,
     view_group_by_deleted,
     view_group_by_updated,
+    view_group_bys_prioritized,
     view_sort_created,
     view_sort_deleted,
     view_sort_updated,
+    view_sortings_prioritized,
     view_updated,
     views_reordered,
 )
@@ -2241,12 +2247,20 @@ class ViewHandler(metaclass=baserow_trace_methods(tracer)):
                 f"A sort with the field {field.pk} already exists."
             )
 
+        priority = (
+            ViewSort.get_highest_order_of_queryset(
+                ViewSort.objects.filter(view=view), field="priority"
+            )
+            + 1
+        )
+
         view_sort = ViewSort.objects.create(
             pk=primary_key,
             view=view,
             field=field,
             order=order,
             type=sort_type,
+            priority=priority,
         )
 
         view_sort_created.send(self, view_sort=view_sort, user=user)
@@ -2359,6 +2373,49 @@ class ViewHandler(metaclass=baserow_trace_methods(tracer)):
         view_sort_deleted.send(
             self, view_sort_id=view_sort_id, view_sort=view_sort, user=user
         )
+
+    def prioritize_sortings(
+        self, user: AbstractUser, view: View, view_sort_ids: List[int]
+    ) -> List[int]:
+        """
+        Updates the priority of the view sortings of the given view so that
+        they match the provided list of view sort ids. Items not included in
+        ``view_sort_ids`` keep their relative position after the ones in
+        ``view_sort_ids``.
+
+        :param user: The user on whose behalf the sortings are prioritized.
+        :param view: The view that owns the sortings.
+        :param view_sort_ids: The list of view sort ids in the desired priority
+            order.
+        :raises ViewSortNotInView: If one of the ids does not belong to the
+            view's sortings.
+        :return: The full ordered list of view sort ids.
+        """
+
+        workspace = view.table.database.workspace
+        CoreHandler().check_permissions(
+            user,
+            PrioritizeViewSortOperationType.type,
+            workspace=workspace,
+            context=view,
+        )
+
+        queryset = ViewSort.objects.select_for_update(of=("self",)).filter(view=view)
+        sort_ids = set(queryset.values_list("id", flat=True))
+
+        for view_sort_id in view_sort_ids:
+            if view_sort_id not in sort_ids:
+                raise ViewSortNotInView(view_sort_id)
+
+        view_sort_ids = ViewSort.order_objects(
+            queryset, view_sort_ids, field="priority"
+        )
+
+        view_sortings_prioritized.send(
+            self, view=view, view_sort_ids=view_sort_ids, user=user
+        )
+
+        return view_sort_ids
 
     def list_group_bys(self, user: AbstractUser, view_id: int) -> QuerySet[ViewGroupBy]:
         """
@@ -2490,6 +2547,13 @@ class ViewHandler(metaclass=baserow_trace_methods(tracer)):
                 f"A group by for the field {field.pk} already exists."
             )
 
+        priority = (
+            ViewGroupBy.get_highest_order_of_queryset(
+                ViewGroupBy.objects.filter(view=view), field="priority"
+            )
+            + 1
+        )
+
         view_group_by = ViewGroupBy.objects.create(
             pk=primary_key,
             view=view,
@@ -2497,6 +2561,7 @@ class ViewHandler(metaclass=baserow_trace_methods(tracer)):
             order=order,
             width=width,
             type=sort_type,
+            priority=priority,
         )
 
         view_group_by_created.send(self, view_group_by=view_group_by, user=user)
@@ -2621,6 +2686,49 @@ class ViewHandler(metaclass=baserow_trace_methods(tracer)):
             view_group_by=view_group_by,
             user=user,
         )
+
+    def prioritize_group_bys(
+        self, user: AbstractUser, view: View, view_group_by_ids: List[int]
+    ) -> List[int]:
+        """
+        Updates the priority of the view group bys of the given view so that
+        they match the provided list of view group by ids. Items not included
+        in ``view_group_by_ids`` keep their relative position after the ones
+        in ``view_group_by_ids``.
+
+        :param user: The user on whose behalf the group bys are prioritized.
+        :param view: The view that owns the group bys.
+        :param view_group_by_ids: The list of view group by ids in the desired
+            priority order.
+        :raises ViewGroupByNotInView: If one of the ids does not belong to the
+            view's group bys.
+        :return: The full ordered list of view group by ids.
+        """
+
+        workspace = view.table.database.workspace
+        CoreHandler().check_permissions(
+            user,
+            PrioritizeViewGroupByOperationType.type,
+            workspace=workspace,
+            context=view,
+        )
+
+        queryset = ViewGroupBy.objects.select_for_update(of=("self",)).filter(view=view)
+        group_by_ids = set(queryset.values_list("id", flat=True))
+
+        for view_group_by_id in view_group_by_ids:
+            if view_group_by_id not in group_by_ids:
+                raise ViewGroupByNotInView(view_group_by_id)
+
+        view_group_by_ids = ViewGroupBy.order_objects(
+            queryset, view_group_by_ids, field="priority"
+        )
+
+        view_group_bys_prioritized.send(
+            self, view=view, view_group_by_ids=view_group_by_ids, user=user
+        )
+
+        return view_group_by_ids
 
     def create_decoration(
         self,

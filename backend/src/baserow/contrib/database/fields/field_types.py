@@ -6229,13 +6229,22 @@ class RollupFieldType(FormulaFieldType):
         "target_field_id",
         "rollup_function",
     ]
-    serializer_field_names = BASEROW_FORMULA_TYPE_ALLOWED_FIELDS + [
+    request_serializer_field_names = (
+        BASEROW_FORMULA_TYPE_REQUEST_SERIALIZER_FIELD_NAMES
+        + [
+            "through_field_id",
+            "target_field_id",
+            "rollup_function",
+            "formula_type",
+        ]
+    )
+    serializer_field_names = BASEROW_FORMULA_TYPE_SERIALIZER_FIELD_NAMES + [
         "through_field_id",
         "target_field_id",
         "rollup_function",
         "formula_type",
     ]
-    serializer_field_overrides = {
+    request_serializer_field_overrides = {
         "through_field_id": serializers.IntegerField(
             required=False,
             allow_null=True,
@@ -6251,14 +6260,6 @@ class RollupFieldType(FormulaFieldType):
         ),
         "nullable": serializers.BooleanField(required=False, read_only=True),
     }
-
-    @property
-    def request_serializer_field_names(self):
-        return self.serializer_field_names
-
-    @property
-    def request_serializer_field_overrides(self):
-        return self.serializer_field_overrides
 
     def before_create(
         self, table, primary, allowed_field_values, order, user, field_kwargs

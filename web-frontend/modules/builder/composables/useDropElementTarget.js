@@ -187,6 +187,14 @@ export function useDropElementTarget({
 
     syncDropPosition(event)
 
+    // Empty placeholders have no reference element, so dragover marks them
+    // active directly when the cursor is over their real DOM box.
+    if (!unref(referenceElement)) {
+      // force dragenter local state because native dragenter event is not always reliable.
+      dragEnterCount = Math.max(dragEnterCount, 1)
+      dndContext.dropTargetId = uid
+    }
+
     event.preventDefault()
     event.stopPropagation()
   }

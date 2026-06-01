@@ -1,5 +1,6 @@
 <template>
   <div
+    ref="elementPreviewRef"
     :key="element.id"
     class="element-preview"
     :class="{
@@ -15,6 +16,7 @@
     }"
     :draggable="isDraggable"
     @click="onSelect"
+    @mousedown="canUpdate && isSelected && onDragHandleMouseDown($event)"
     @dragstart.stop="onDragStart"
     @dragend="onDragEnd"
     @dragenter="onDragEnter"
@@ -48,8 +50,10 @@
       @duplicate="duplicateElement"
       @select-parent="selectParentElement()"
       @drag-handle-mousedown="onDragHandleMouseDown"
+      @mousedown.stop
     />
     <PageElement
+      ref="elementRef"
       :element="element"
       :mode="mode"
       class="element--read-only"
@@ -72,7 +76,7 @@
 </template>
 
 <script>
-import { computed, inject } from 'vue'
+import { computed, inject, ref } from 'vue'
 import { useStore, mapActions, mapGetters } from 'vuex'
 import ElementMenu from '@baserow/modules/builder/components/elements/ElementMenu'
 import InsertElementButton from '@baserow/modules/builder/components/elements/InsertElementButton'
@@ -113,6 +117,8 @@ export default {
   },
   emits: ['move'],
   setup(props) {
+    const elementPreviewRef = ref(null)
+    const elementRef = ref(null)
     const store = useStore()
     const builder = inject('builder')
 
@@ -129,13 +135,71 @@ export default {
         props.element.parent_element_id
       )
     })
+
+    function getDragImageScale(rect) {
+      const defaultDragImageScale = 0.5
+      const maxHeightRatioBeforeScalingDown = 0.3
+      const viewportHeight =
+        window.innerHeight || document.documentElement.clientHeight
+      const maxHeightBeforeScalingDown =
+        viewportHeight * maxHeightRatioBeforeScalingDown
+      const defaultScaledHeight = rect.height * defaultDragImageScale
+
+      if (
+        !viewportHeight ||
+        defaultScaledHeight <= maxHeightBeforeScalingDown
+      ) {
+        return defaultDragImageScale
+      }
+
+      return maxHeightBeforeScalingDown / rect.height
+    }
+
+    function createDragImage() {
+      const source = elementRef.value.$el
+      const rect = source.getBoundingClientRect()
+      const dragImageScale = getDragImageScale(rect)
+
+      const clone = source.cloneNode(true)
+
+      Object.assign(clone.style, {
+        boxSizing: 'border-box',
+        width: `${rect.width}px`,
+        minWidth: `${rect.width}px`,
+        maxWidth: `${rect.width}px`,
+        transform: `scale(${dragImageScale})`,
+        transformOrigin: 'top left',
+      })
+
+      const container = document.createElement('div')
+      Object.assign(container.style, {
+        position: 'fixed',
+        top: '0',
+        left: '0',
+        pointerEvents: 'none',
+      })
+      container.appendChild(clone)
+      elementPreviewRef.value.appendChild(container)
+      requestAnimationFrame(() => {
+        // immediately remove the cloned element
+        elementPreviewRef.value.removeChild(container)
+      })
+
+      return container
+    }
+
     return {
-      ...useElementDraggable({ element: props.element }),
+      ...useElementDraggable({
+        element: props.element,
+        getDragImage: createDragImage,
+      }),
       ...useDropElementTarget({
         parentElement,
         referenceElement: props.element,
         placeInContainer: props.element.place_in_container,
       }),
+      elementPreviewRef,
+      elementRef,
       parentElement,
       elementPage,
     }

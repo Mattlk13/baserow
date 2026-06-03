@@ -138,9 +138,6 @@ const mutations = {
   _SET_ELEMENT_NAMESPACE_PATH(state, { element, path }) {
     element._.elementNamespacePath = path
   },
-  SET_REPEAT_ELEMENT_COLLAPSED(state, { element, collapsed }) {
-    element._.collapsed = collapsed
-  },
 }
 
 const actions = {
@@ -544,12 +541,6 @@ const actions = {
       path: elementNamespacePath,
     })
   },
-  setRepeatElementCollapsed({ commit }, { element, collapsed }) {
-    commit('SET_REPEAT_ELEMENT_COLLAPSED', {
-      element,
-      collapsed,
-    })
-  },
 }
 
 const getters = {
@@ -714,9 +705,6 @@ const getters = {
     }
 
     return null
-  },
-  getRepeatElementCollapsed: (state) => (element) => {
-    return element._.collapsed
   },
 }
 

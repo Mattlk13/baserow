@@ -4,15 +4,16 @@
     "cannotDisableAllAuthProvidersDescription": "It is not possible to disable or delete last enabled provider."
   },
   "advanced": {
-    "license": "Advanced"
+    "license": "Advanced",
+    "openSubscriptions": "Open subscriptions for more seats"
   },
   "enterprise": {
     "license": "Enterprise",
     "sidebarTooltip": "Your account has access to the enterprise features globally",
     "rbac": "RBAC",
     "sso": "SSO",
-    "licenseDescription": "Viewers are free with Baserow Enterprise. If a user has any other role, in any workspace then they will use a paid seat automatically.",
-    "overflowWarning": "You have too many non-viewer users and have used up all of your paid seats. Change users to become viewers on each workspaces members page.",
+    "licenseDescription": "Viewers and commenters free in this plan. If a user has any other role, in any workspace then they will use a paid seat automatically.",
+    "overflowWarning": "You have too many non-viewer/commenter users and have used up all of your paid seats. Change users to become viewers on each workspaces members page.",
     "deactivated": "Available in the advanced/enterprise version"
   },
   "trashType": {

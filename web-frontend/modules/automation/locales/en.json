@@ -182,21 +182,15 @@
     "chooseEvent": "Choose an event..."
   },
   "simulateDispatch": {
-    "sampleDataLabel": "Output",
     "triggerNodeAwaitingEvent": "The node is waiting. Please manually trigger the event to populate the payload and complete the test.",
     "simulationInProgress": "Node test is in progress...",
     "errorNodeNotConfigured": "The node must be configured before it can be tested.",
     "errorPreviousNodeNotConfigured": "The previous node \"{node}\" must be configured.",
     "errorPreviousNodesNotTested": "The previous node \"{node}\" must be tested first.",
-    "buttonLabelTest": "Test event",
-    "buttonLabelTestAgain": "Test event again",
-    "testNodeDescription": "Test this event to confirm the configuration is correct. Data from this test can be used in later steps.",
-    "buttonLabelShowPayload": "Show payload",
-    "buttonLabelShowError": "Show error",
+    "buttonLabelTest": "Test node",
+    "buttonLabelTestAgain": "Test node again",
+    "testNodeDescription": "Test this node to confirm the configuration is correct. Data from this test can be used in later steps.",
     "sampleDataModalTitle": "Payload for {nodeLabel}",
-    "sampleDataModalSubTitle": "JSON payload",
-    "sampleDataCopy": "Copy",
-    "errorOccurred": "An error occurred...",
-    "sampleDataCopied": "Payload copied to clipboard"
+    "sampleDataModalSubTitle": "JSON payload"
   }
 }

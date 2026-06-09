@@ -19,6 +19,29 @@
   "trashType": {
     "team": "team"
   },
+  "serviceType": {
+    "coreCode": "Execute code",
+    "coreCodeDescription": "Runs arbitrary JavaScript code.",
+    "errorCodeMissing": "Missing code property"
+  },
+  "coreCodeServiceForm": {
+    "codeLabel": "Code",
+    "codeHelperText": "Baserow calls the main(context) function when the action runs. Use context to read injected values and return an object whose properties can be used by later actions.",
+    "codePlaceholder": "Enter the code to execute",
+    "editCode": "Edit code",
+    "injectionsLabel": "Data injections",
+    "injectionsHelperText": "Injections are formulas evaluated before the code runs. Each injection name becomes a property of context. For example an injection named customerName is available as context.customerName.",
+    "nameLabel": "Name",
+    "namePlaceholder": "Variable name",
+    "valueLabel": "Value",
+    "valuePlaceholder": "Value formula",
+    "addInjection": "Add injection",
+    "nameFieldRequired": "The name field is required.",
+    "nameFieldInvalid": "The name must be a valid variable name."
+  },
+  "nodeType": {
+    "codeLabel": "Execute code"
+  },
   "createTeamModal": {
     "title": "Create team",
     "invalidNameTitle": "Please use a different name",

@@ -93,12 +93,15 @@ import { CustomCodeBuilderSettingType } from '@baserow_enterprise/builderSetting
 import { RealtimePushTwoWaySyncStrategyType } from '@baserow_enterprise/twoWaySyncStrategyTypes'
 import { RestrictedViewOwnershipType } from '@baserow_enterprise/viewOwnershipTypes'
 import { AIDatabaseOnboardingStepType } from '@baserow_enterprise/databaseOnboardingStepTypes'
+import { CoreCodeServiceType } from '@baserow_enterprise/integrations/core/serviceTypes'
+import { CoreCodeWorkflowActionType } from '@baserow_enterprise/builder/workflowActionTypes'
+import { CoreCodeNodeType } from '@baserow_enterprise/automation/nodeTypes'
 
 export default defineNuxtPlugin({
   name: 'enterprise',
   dependsOn: ['premium', 'registry'],
   setup(nuxtApp) {
-    const { $registry, $store } = nuxtApp
+    const { $config, $registry, $store } = nuxtApp
 
     const context = { app: nuxtApp }
 
@@ -157,6 +160,14 @@ export default defineNuxtPlugin({
     $registry.register('license', new EnterpriseLicenseType(context))
 
     $registry.register('userSource', new LocalBaserowUserSourceType(context))
+    if ($config.public.baserowEnterpriseCodeRunnerDefaultType) {
+      $registry.register('service', new CoreCodeServiceType(context))
+      $registry.register(
+        'workflowAction',
+        new CoreCodeWorkflowActionType(context)
+      )
+      $registry.register('node', new CoreCodeNodeType(context))
+    }
 
     $registry.register(
       'appAuthProvider',

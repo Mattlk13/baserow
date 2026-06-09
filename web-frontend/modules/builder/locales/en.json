@@ -818,6 +818,11 @@
     "firstPartName": "Data source: {name}",
     "schemaProperty": "{prefixName}: {schemaProperty}"
   },
+  "workflowAction": {
+    "sampleDataModalTitle": "Payload for {actionLabel}",
+    "sampleDataModalSubTitle": "JSON payload",
+    "testActionDescription": "Run this action in preview to capture its output and make it available to following actions."
+  },
   "workflowActionTypes": {
     "notificationLabel": "Show Notification",
     "openPageLabel": "Open Page",

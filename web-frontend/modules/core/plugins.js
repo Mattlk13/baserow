@@ -137,8 +137,8 @@ export class BaserowPlugin extends Registerable {
 
   /**
    * Every registered plugin can display multiple additional context items in the
-   * application context displayed by the sidebar when opening the context menu of a
-   * application.
+   * application context displayed by the sidebar when opening the context menu of
+   * an application.
    * @returns {*[]}
    */
   getAdditionalApplicationContextComponents(workspace, application) {
@@ -147,11 +147,10 @@ export class BaserowPlugin extends Registerable {
 
   /**
    * Every registered plugin can display multiple additional context items in the
-   * table context displayed by the sidebar when opening the context menu of a
-   * table.
+   * context menu of an application child item.
    * @returns {*[]}
    */
-  getAdditionalTableContextComponents(workspace, table) {
+  getAdditionalApplicationChildContextComponents(workspace, application, item) {
     return []
   }
 

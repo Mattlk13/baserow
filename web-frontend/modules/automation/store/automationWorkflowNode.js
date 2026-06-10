@@ -202,6 +202,10 @@ const actions = {
       // Remove temp node and add real one
       commit('DELETE_ITEM', { workflow, nodeId: tempNode.id })
 
+      await dispatch('application/refreshPermissions', workflow.automation_id, {
+        root: true,
+      })
+
       setTimeout(() => {
         const populatedNode = getters.findById(workflow, node.id)
         dispatch('select', { workflow, node: populatedNode })

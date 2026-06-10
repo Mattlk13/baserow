@@ -275,6 +275,7 @@ const actions = {
 
     if (forceCreate) {
       await dispatch('forceCreate', { page, element })
+      await dispatch('application/refreshPermissions', builder, { root: true })
 
       await dispatch('select', { builder, element })
     }

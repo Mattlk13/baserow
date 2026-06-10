@@ -1,6 +1,6 @@
 {
-  "type": "bug",
-  "message": "Fix multiple select field no value in row edit modal.",
+  "type": "refactor",
+  "message": "Improve list views endpoint performance when there are many views and fields.",
   "issue_origin": "github",
   "issue_number": null,
   "domain": "database",

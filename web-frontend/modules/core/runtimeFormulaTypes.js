@@ -14,6 +14,7 @@ import {
   TimedeltaBaserowRuntimeFormulaArgumentType,
   DatetimeFormatBaserowRuntimeFormulaArgumentType,
   DurationBaserowRuntimeFormulaArgumentType,
+  DurationFormatBaserowRuntimeFormulaArgumentType,
   Timedelta,
 } from '@baserow/modules/core/runtimeFormulaArgumentTypes'
 import {
@@ -28,6 +29,10 @@ import {
   ensureArray,
   ensureDateTime,
 } from '@baserow/modules/core/utils/validator'
+import {
+  formatValueWithDurationFormat,
+  parseValueWithDurationFormat,
+} from '@baserow/modules/core/utils/duration'
 import { Node, VueNodeViewRenderer } from '@tiptap/vue-3'
 import GetFormulaComponent from '@baserow/modules/core/components/formula/GetFormulaComponent'
 import { mergeAttributes } from '@tiptap/core'
@@ -308,7 +313,7 @@ export class RuntimeGet extends RuntimeFormulaFunction {
   }
 
   static getCategoryType() {
-    return FORMULA_CATEGORY.TEXT
+    return FORMULA_CATEGORY.UTILITY
   }
 
   get args() {
@@ -480,10 +485,16 @@ export class RuntimeAdd extends RuntimeFormulaFunction {
       const dt = new DateTimeBaserowRuntimeFormulaArgumentType()
       const td = new TimedeltaBaserowRuntimeFormulaArgumentType()
       if (num.test(a) && num.test(b)) return []
+      if (td.test(a) && td.test(b)) return []
+      if ((td.test(a) && num.test(b)) || (num.test(a) && td.test(b))) return []
       if ((dt.test(a) && td.test(b)) || (td.test(a) && dt.test(b))) return []
       if (!(num.test(a) || dt.test(a) || td.test(a))) return [[0, a]]
-      return [[1, b]]
+      if (!(num.test(b) || dt.test(b) || td.test(b))) return [[1, b]]
+
+      // Reject invalid pairs, e.g.: datetime + number, datetime + datetime, etc.
+      return [[0, a]]
     }
+
     return super.validateTypeOfArgs(args)
   }
 
@@ -496,6 +507,15 @@ export class RuntimeAdd extends RuntimeFormulaFunction {
 
   execute(context, args) {
     const [a, b] = args
+    if (a instanceof Timedelta && b instanceof Timedelta) {
+      return new Timedelta(a.ms + b.ms)
+    }
+    if (a instanceof Timedelta && typeof b === 'number') {
+      return new Timedelta(a.ms + b * 1000)
+    }
+    if (typeof a === 'number' && b instanceof Timedelta) {
+      return new Timedelta(a * 1000 + b.ms)
+    }
     if (a instanceof Date && b instanceof Timedelta) {
       return new Date(a.getTime() + b.ms)
     }
@@ -555,10 +575,15 @@ export class RuntimeMinus extends RuntimeFormulaFunction {
       const dt = new DateTimeBaserowRuntimeFormulaArgumentType()
       const td = new TimedeltaBaserowRuntimeFormulaArgumentType()
       if (num.test(a) && num.test(b)) return []
+      if (td.test(a) && td.test(b)) return []
+      if ((td.test(a) && num.test(b)) || (num.test(a) && td.test(b))) return []
       if (dt.test(a) && td.test(b)) return []
-      if (!(num.test(a) || dt.test(a))) return [[0, a]]
+      if (!(num.test(a) || dt.test(a) || td.test(a))) return [[0, a]]
+
+      // Reject invalid pairs, e.g.: datetime - number, timedelta - datetime, etc.
       return [[1, b]]
     }
+
     return super.validateTypeOfArgs(args)
   }
 
@@ -571,6 +596,15 @@ export class RuntimeMinus extends RuntimeFormulaFunction {
 
   execute(context, args) {
     const [a, b] = args
+    if (a instanceof Timedelta && b instanceof Timedelta) {
+      return new Timedelta(a.ms - b.ms)
+    }
+    if (a instanceof Timedelta && typeof b === 'number') {
+      return new Timedelta(a.ms - b * 1000)
+    }
+    if (typeof a === 'number' && b instanceof Timedelta) {
+      return new Timedelta(a * 1000 - b.ms)
+    }
     if (a instanceof Date && b instanceof Timedelta) {
       return new Date(a.getTime() - b.ms)
     }
@@ -620,8 +654,38 @@ export class RuntimeMultiply extends RuntimeFormulaFunction {
     ]
   }
 
+  validateTypeOfArgs(args) {
+    if (args.length === 2) {
+      const [a, b] = args
+      const num = new NumberBaserowRuntimeFormulaArgumentType()
+      const td = new TimedeltaBaserowRuntimeFormulaArgumentType()
+      if (num.test(a) && num.test(b)) return []
+      if ((td.test(a) && num.test(b)) || (num.test(a) && td.test(b))) return []
+      if (!(num.test(a) || td.test(a))) return [[0, a]]
+
+      // Reject invalid pairs, e.g.: timedelta * timedelta, etc.
+      return [[1, b]]
+    }
+
+    return super.validateTypeOfArgs(args)
+  }
+
+  parseArgs(args) {
+    if (args.some((a) => a instanceof Timedelta)) {
+      return args
+    }
+    return super.parseArgs(args)
+  }
+
   execute(context, args) {
-    return args[0] * args[1]
+    const [a, b] = args
+    if (a instanceof Timedelta && typeof b === 'number') {
+      return new Timedelta(a.ms * b)
+    }
+    if (typeof a === 'number' && b instanceof Timedelta) {
+      return new Timedelta(b.ms * a)
+    }
+    return a * b
   }
 
   getDescription() {
@@ -667,8 +731,35 @@ export class RuntimeDivide extends RuntimeFormulaFunction {
     ]
   }
 
+  validateTypeOfArgs(args) {
+    if (args.length === 2) {
+      const [a, b] = args
+      const num = new NumberBaserowRuntimeFormulaArgumentType()
+      const td = new TimedeltaBaserowRuntimeFormulaArgumentType()
+      if (num.test(a) && num.test(b)) return []
+      if (td.test(a) && num.test(b)) return []
+      if (!(num.test(a) || td.test(a))) return [[0, a]]
+
+      // Reject invalid pairs, e.g.: number / timedelta, timedelta / timedelta, etc.
+      return [[1, b]]
+    }
+
+    return super.validateTypeOfArgs(args)
+  }
+
+  parseArgs(args) {
+    if (args.some((a) => a instanceof Timedelta)) {
+      return args
+    }
+    return super.parseArgs(args)
+  }
+
   execute(context, args) {
-    return args[0] / args[1]
+    const [a, b] = args
+    if (a instanceof Timedelta && typeof b === 'number') {
+      return new Timedelta(a.ms / b)
+    }
+    return a / b
   }
 
   getDescription() {
@@ -1696,7 +1787,7 @@ export class RuntimeGetProperty extends RuntimeFormulaFunction {
   }
 
   static getCategoryType() {
-    return FORMULA_CATEGORY.TEXT
+    return FORMULA_CATEGORY.UTILITY
   }
 
   get args() {
@@ -1851,7 +1942,7 @@ export class RuntimeGenerateUUID extends RuntimeFormulaFunction {
   }
 
   static getCategoryType() {
-    return FORMULA_CATEGORY.TEXT
+    return FORMULA_CATEGORY.UTILITY
   }
 
   get args() {
@@ -2070,7 +2161,7 @@ export class RuntimeLength extends RuntimeFormulaFunction {
   }
 
   static getCategoryType() {
-    return FORMULA_CATEGORY.TEXT
+    return FORMULA_CATEGORY.UTILITY
   }
 
   get args() {
@@ -2118,7 +2209,7 @@ export class RuntimeContains extends RuntimeFormulaFunction {
   }
 
   static getCategoryType() {
-    return FORMULA_CATEGORY.TEXT
+    return FORMULA_CATEGORY.UTILITY
   }
 
   get args() {
@@ -2172,7 +2263,7 @@ export class RuntimeReverse extends RuntimeFormulaFunction {
   }
 
   static getCategoryType() {
-    return FORMULA_CATEGORY.TEXT
+    return FORMULA_CATEGORY.UTILITY
   }
 
   get args() {
@@ -2328,7 +2419,7 @@ export class RuntimeIsEmpty extends RuntimeFormulaFunction {
   }
 
   static getCategoryType() {
-    return FORMULA_CATEGORY.BOOLEAN
+    return FORMULA_CATEGORY.UTILITY
   }
 
   get args() {
@@ -2524,7 +2615,7 @@ export class RuntimeAt extends RuntimeFormulaFunction {
   }
 
   static getCategoryType() {
-    return FORMULA_CATEGORY.TEXT
+    return FORMULA_CATEGORY.UTILITY
   }
 
   get args() {
@@ -2616,7 +2707,7 @@ export class RuntimeNull extends RuntimeFormulaFunction {
   }
 
   static getCategoryType() {
-    return FORMULA_CATEGORY.TEXT
+    return FORMULA_CATEGORY.UTILITY
   }
 
   get args() {
@@ -2825,10 +2916,80 @@ export class RuntimeToDuration extends RuntimeFormulaFunction {
   }
 
   get args() {
-    return [new DurationBaserowRuntimeFormulaArgumentType()]
+    return [
+      new DurationBaserowRuntimeFormulaArgumentType(),
+      new DurationFormatBaserowRuntimeFormulaArgumentType({ optional: true }),
+    ]
+  }
+
+  formatMismatchError(value, durationFormat) {
+    return `'${value}' could not be parsed using format '${durationFormat}'.`
+  }
+
+  timedeltaWithFormatError() {
+    return 'A duration format cannot be applied to a timedelta value.'
+  }
+
+  validateTypeOfArgs(args) {
+    // When a format is provided, arg 0's validity depends on the format.
+    // Defer checking arg 0 to validateArgs() in that case.
+    if (args.length === 2) {
+      if (!this.args[1].test(args[1])) {
+        return [[1, args[1]]]
+      }
+      return []
+    }
+    return super.validateTypeOfArgs(args)
+  }
+
+  validateArgs(args, { ctx = null, validationContext = {} } = {}) {
+    super.validateArgs(args, { ctx, validationContext })
+
+    if (args.length !== 2) {
+      return
+    }
+
+    const [value, durationFormat] = args
+    if (typeof value === 'string') {
+      if (parseValueWithDurationFormat(value, durationFormat) === null) {
+        throw new InvalidFormulaArgument(
+          this.getType(),
+          this.formatMismatchError(value, durationFormat)
+        )
+      }
+    }
+  }
+
+  parseArgs(args) {
+    // When the format arg is provided, defer parsing of the 1st arg to
+    // execute() so the raw value string is checked later.
+    if (args.length === 2) {
+      return [args[0], this.args[1].parse(args[1])]
+    }
+    return super.parseArgs(args)
   }
 
   execute(context, args) {
+    if (args.length === 2) {
+      const [value, durationFormat] = args
+      // Arg 0 may resolve to a Timedelta at runtime (e.g. from a get() on
+      // a duration field), in which case it doesn't make sense to
+      // apply a format.
+      if (value instanceof Timedelta) {
+        throw new InvalidFormulaArgument(
+          this.getType(),
+          this.timedeltaWithFormatError()
+        )
+      }
+      const result = parseValueWithDurationFormat(value, durationFormat)
+      if (result === null) {
+        throw new InvalidFormulaArgument(
+          this.getType(),
+          this.formatMismatchError(value, durationFormat)
+        )
+      }
+      return result
+    }
     return args[0]
   }
 
@@ -2840,12 +3001,64 @@ export class RuntimeToDuration extends RuntimeFormulaFunction {
   getExamples() {
     return [
       {
+        formula: "to_duration('1:30:15.234', 'h:mm:ss.fff')",
+        result: '5415 seconds',
+      },
+      {
         formula: "to_duration('1 day')",
         result: '86400 seconds',
       },
       {
         formula: "now() + to_duration('1 day')",
         result: "'2025-10-17 11:05:38'",
+      },
+    ]
+  }
+}
+
+export class RuntimeDurationFormat extends RuntimeFormulaFunction {
+  static getType() {
+    return 'duration_format'
+  }
+
+  static getFormulaType() {
+    return FORMULA_TYPE.FUNCTION
+  }
+
+  static getCategoryType() {
+    return FORMULA_CATEGORY.DATE
+  }
+
+  get args() {
+    return [
+      new DurationBaserowRuntimeFormulaArgumentType(),
+      new DurationFormatBaserowRuntimeFormulaArgumentType(),
+    ]
+  }
+
+  execute(context, args) {
+    const [duration, durationFormat] = args
+    if (duration === null || duration === undefined) {
+      return null
+    }
+    return formatValueWithDurationFormat(duration, durationFormat)
+  }
+
+  getDescription() {
+    const { $i18n: i18n } = this.app
+    return i18n.t('runtimeFormulaTypes.durationFormatDescription')
+  }
+
+  getExamples() {
+    return [
+      {
+        formula:
+          "duration_format(to_duration('1:30:25.234', 'h:mm:ss.fff'), 'h:mm:ss.f')",
+        result: "'1:30:25.2'",
+      },
+      {
+        formula: "duration_format(get('Duration'), 'd h:mm')",
+        result: "'1 2:30'",
       },
     ]
   }

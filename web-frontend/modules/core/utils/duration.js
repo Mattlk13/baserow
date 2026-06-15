@@ -28,6 +28,227 @@ export class Timedelta {
   }
 }
 
+// Keep in sync with duration.py::tokenize_duration_format
+const DURATION_FORMAT_TOKENS = [
+  ['hh', 'hours'],
+  ['mm', 'minutes'],
+  ['ss', 'seconds'],
+  ['d', 'days'],
+  ['h', 'hours'],
+  ['m', 'minutes'],
+  ['s', 'seconds'],
+]
+
+const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+export const tokenizeDurationFormat = (formatStr) => {
+  if (typeof formatStr !== 'string' || formatStr.length === 0) return null
+
+  const pattern = ['^-?']
+  const fields = []
+  const seen = new Set()
+  let i = 0
+  while (i < formatStr.length) {
+    // A backslash escapes the next character so it is matched/emitted as a
+    // literal, even token letters (d/h/m/s/f) or the backslash itself. This
+    // lets formats carry literal unit suffixes, e.g. `d\d h\h` -> "1d 2h". A
+    // trailing backslash has nothing to escape and is invalid.
+    if (formatStr[i] === '\\') {
+      if (i + 1 >= formatStr.length) return null
+      pattern.push(escapeRegExp(formatStr[i + 1]))
+      i += 2
+      continue
+    }
+    // The fractional-seconds token "f" is consumed as a run ("f", "ff", "fff",
+    // …) whose length is the precision (mirrors the hh/mm/ss width semantics).
+    // It is a distinct field that may appear at most once, and the separator
+    // before it stays a literal so arbitrary delimiters work ("ss.fff",
+    // "s fff", "mm:ss,ff").
+    if (formatStr[i] === 'f') {
+      if (seen.has('fraction')) return null
+      seen.add('fraction')
+      let precision = 0
+      while (i < formatStr.length && formatStr[i] === 'f') {
+        precision += 1
+        i += 1
+      }
+      fields.push('fraction')
+      // capture up to `precision` digits; extra digits won't match
+      pattern.push(`(\\d{1,${precision}})`)
+      continue
+    }
+    let matched = false
+    for (const [token, field] of DURATION_FORMAT_TOKENS) {
+      if (formatStr.startsWith(token, i)) {
+        if (seen.has(field)) return null
+        seen.add(field)
+        fields.push(field)
+        pattern.push('(\\d+)')
+        i += token.length
+        matched = true
+        break
+      }
+    }
+    if (!matched) {
+      pattern.push(escapeRegExp(formatStr[i]))
+      i += 1
+    }
+  }
+
+  if (fields.length === 0) return null
+
+  pattern.push('$')
+  return { pattern: new RegExp(pattern.join('')), fields }
+}
+
+export const isValidDurationFormat = (value) =>
+  tokenizeDurationFormat(value) !== null
+
+// Return the precision (length of the `f` run) of a validated token format, or
+// 0 if it has no fractional token. Walks the format honoring backslash escapes
+// so an escaped `\f` literal is not mistaken for the fraction token. Keep in
+// sync with duration.py::_fraction_precision.
+const fractionPrecision = (formatStr) => {
+  let i = 0
+  while (i < formatStr.length) {
+    if (formatStr[i] === '\\') {
+      i += 2
+      continue
+    }
+    if (formatStr[i] === 'f') {
+      let precision = 0
+      while (i < formatStr.length && formatStr[i] === 'f') {
+        precision += 1
+        i += 1
+      }
+      return precision
+    }
+    i += 1
+  }
+  return 0
+}
+
+export const parseValueWithDurationFormat = (value, formatStr) => {
+  if (typeof value !== 'string') return null
+  const tokenized = tokenizeDurationFormat(formatStr)
+  if (tokenized === null) return null
+
+  const stripped = value.trim()
+  const negative = stripped.startsWith('-')
+  const match = stripped.match(tokenized.pattern)
+  if (match === null) return null
+
+  const parts = { days: 0, hours: 0, minutes: 0, seconds: 0 }
+  let fractionMs = 0
+  tokenized.fields.forEach((field, idx) => {
+    const group = match[idx + 1]
+    if (field === 'fraction') {
+      // The captured digits are a positional decimal: "5" -> 0.5,
+      // "05" -> 0.05, "234" -> 0.234.
+      fractionMs = (parseInt(group, 10) / 10 ** group.length) * 1000
+    } else {
+      parts[field] = parseInt(group, 10)
+    }
+  })
+
+  let ms =
+    parts.days * SECS_IN_DAY * 1000 +
+    parts.hours * SECS_IN_HOUR * 1000 +
+    parts.minutes * SECS_IN_MIN * 1000 +
+    parts.seconds * 1000 +
+    fractionMs
+  if (negative) ms = -ms
+  return new Timedelta(ms)
+}
+
+// Keep in sync with duration.py::format_value_with_duration_format
+export const formatValueWithDurationFormat = (value, formatStr) => {
+  if (!(value instanceof Timedelta)) return null
+  const tokenized = tokenizeDurationFormat(formatStr)
+  if (tokenized === null) return null
+
+  const fieldSet = new Set(tokenized.fields)
+  const negative = value.ms < 0
+  const absMs = Math.abs(value.ms)
+
+  // Precision is the number of `f`s in the format, or 0 for integer-second
+  // formats (no fraction token).
+  const precision = fieldSet.has('fraction') ? fractionPrecision(formatStr) : 0
+
+  // Round the total to the target precision *before* decomposing, so a
+  // rounded-up value carries across fields: 59.9996 at precision 3 -> 60.000
+  // rolls seconds into minutes, and 59.6 at precision 0 -> 60 rolls into a
+  // minute. `Math.round` rounds half up, matching the backend's half-away-from-
+  // zero on the absolute value. Keep in sync with duration.py.
+  const factor = 10 ** precision
+  const total = Math.round((absMs / 1000) * factor) / factor
+  const totalSeconds = Math.trunc(total)
+  const fractionValue = total - totalSeconds
+
+  let days = 0
+  let hours = 0
+  let minutes = 0
+  let seconds = 0
+  if (fieldSet.has('days')) {
+    days = Math.trunc(totalSeconds / SECS_IN_DAY)
+  }
+  if (fieldSet.has('hours')) {
+    hours = fieldSet.has('days')
+      ? Math.trunc((totalSeconds % SECS_IN_DAY) / SECS_IN_HOUR)
+      : Math.trunc(totalSeconds / SECS_IN_HOUR)
+  }
+  if (fieldSet.has('minutes')) {
+    minutes =
+      fieldSet.has('hours') || fieldSet.has('days')
+        ? Math.trunc((totalSeconds % SECS_IN_HOUR) / SECS_IN_MIN)
+        : Math.trunc(totalSeconds / SECS_IN_MIN)
+  }
+  if (fieldSet.has('seconds')) {
+    seconds =
+      fieldSet.has('minutes') || fieldSet.has('hours') || fieldSet.has('days')
+        ? totalSeconds % SECS_IN_MIN
+        : totalSeconds
+  }
+
+  const fieldValues = { days, hours, minutes, seconds }
+  const out = []
+  let i = 0
+  while (i < formatStr.length) {
+    if (formatStr[i] === '\\') {
+      // Escaped literal, emit the next character verbatim. The format is
+      // already validated (tokenize succeeded), so a following char exists.
+      out.push(formatStr[i + 1])
+      i += 2
+      continue
+    }
+    if (formatStr[i] === 'f') {
+      // Render the fractional component as `precision` zero-padded digits
+      // (mirrors printf's %0width.Nf).
+      const digits = Math.round(fractionValue * 10 ** precision)
+      out.push(String(digits).padStart(precision, '0'))
+      i += precision
+      continue
+    }
+    let matched = false
+    for (const [token, field] of DURATION_FORMAT_TOKENS) {
+      if (formatStr.startsWith(token, i)) {
+        const v = fieldValues[field]
+        out.push(token.length === 2 ? String(v).padStart(2, '0') : String(v))
+        i += token.length
+        matched = true
+        break
+      }
+    }
+    if (!matched) {
+      out.push(formatStr[i])
+      i += 1
+    }
+  }
+
+  const result = out.join('')
+  return negative ? `-${result}` : result
+}
+
 const DURATION_PATTERNS = [
   { regex: /^(\d+)\s+years?$/i, unit: 'days', factor: 365 },
   { regex: /^(\d+)\s+months?$/i, unit: 'days', factor: 30 },
@@ -298,6 +519,24 @@ export const DURATION_FORMATS = new Map([
   ],
 ])
 
+// Maps each field DURATION_FORMATS key to the equivalent token-engine format
+// consumed by formatValueWithDurationFormat. The `s`-fraction forms become `f`
+// runs, and the `d`-prefixed display formats use backslash-escaped literal unit
+// letters (e.g. `d\d h\h` -> "1d 2h"), which the token engine cannot emit
+// otherwise. Keep in sync with duration.py::DURATION_TOKEN_FORMATS.
+const DURATION_TOKEN_FORMATS = {
+  [H_M]: 'h:mm',
+  [H_M_S]: 'h:mm:ss',
+  [H_M_S_S]: 'h:mm:ss.f',
+  [H_M_S_SS]: 'h:mm:ss.ff',
+  [H_M_S_SSS]: 'h:mm:ss.fff',
+  [D_H]: 'd\\d h\\h',
+  [D_H_M]: 'd\\d h:mm',
+  [D_H_M_S]: 'd\\d h:mm:ss',
+  [D_H_M_NO_COLONS]: 'd\\d h\\h mm\\m',
+  [D_H_M_S_NO_COLONS]: 'd\\d h\\h mm\\m ss\\s',
+}
+
 export const roundDurationValueToFormat = (value, format) => {
   if (value === null) {
     return null
@@ -384,22 +623,20 @@ export const parseDurationString = (value) => {
 }
 
 /**
- * It formats the given duration value using the given format.
+ * It formats the given duration value (a number of seconds) using the given
+ * format.
+ *
+ * Thin adapter over the token formatter (`formatValueWithDurationFormat`), which
+ * is the single source of truth for duration display. It converts the seconds
+ * value to a `Timedelta` (ms) and translates the field's DURATION_FORMATS key to
+ * the equivalent token format first.
  */
 export const formatDurationValue = (value, format) => {
   if (value === null || value === undefined || value === '') {
     return ''
   }
-  let sign = ''
-  if (value < 0) {
-    sign = '-'
-    value = -1 * value
-  }
-  const days = Math.floor(value / 86400)
-  const hours = Math.floor((value % 86400) / 3600)
-  const mins = Math.floor((value % 3600) / 60)
-  const secs = value % 60
-
-  const formatFunc = DURATION_FORMATS.get(format).toString
-  return `${sign}${formatFunc(days, hours, mins, secs)}`
+  return formatValueWithDurationFormat(
+    new Timedelta(value * 1000),
+    DURATION_TOKEN_FORMATS[format]
+  )
 }

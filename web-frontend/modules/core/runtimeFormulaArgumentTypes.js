@@ -13,6 +13,7 @@ import {
   isValidDatetimeFormat,
   parseDurationString,
 } from '@baserow/modules/core/utils/date'
+import { isValidDurationFormat } from '@baserow/modules/core/utils/duration'
 export { Timedelta, parseDurationString }
 
 const VALID_THOUSAND_SEPARATORS = new Set([',', '.', ' ', ''])
@@ -85,6 +86,10 @@ export class NumberBaserowRuntimeFormulaArgumentType extends BaserowRuntimeFormu
       return parseFloat(val)
     }
     return val
+  }
+
+  getErrorMessage(value, i18n) {
+    return i18n.t('runtimeFormulaTypeErrors.invalidNumber', { value })
   }
 }
 
@@ -286,5 +291,19 @@ export class DatetimeFormatBaserowRuntimeFormulaArgumentType extends BaserowRunt
 
   getErrorMessage(value, i18n) {
     return i18n.t('runtimeFormulaTypeErrors.invalidDatetimeFormat', { value })
+  }
+}
+
+export class DurationFormatBaserowRuntimeFormulaArgumentType extends BaserowRuntimeFormulaArgumentType {
+  test(value) {
+    return isValidDurationFormat(value)
+  }
+
+  parse(value) {
+    return ensureString(value)
+  }
+
+  getErrorMessage(value, i18n) {
+    return i18n.t('runtimeFormulaTypeErrors.invalidDurationFormat', { value })
   }
 }

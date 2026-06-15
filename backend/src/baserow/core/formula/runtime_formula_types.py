@@ -7,6 +7,10 @@ from zoneinfo import ZoneInfo
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
+from baserow.core.duration import (
+    format_value_with_duration_format,
+    parse_value_with_duration_format,
+)
 from baserow.core.exceptions import InstanceTypeDoesNotExist
 from baserow.core.formula import BaserowFormulaSyntaxError
 from baserow.core.formula.argument_types import (
@@ -18,6 +22,7 @@ from baserow.core.formula.argument_types import (
     DecimalSeparatorBaserowRuntimeFormulaArgumentType,
     DictBaserowRuntimeFormulaArgumentType,
     DurationBaserowRuntimeFormulaArgumentType,
+    DurationFormatBaserowRuntimeFormulaArgumentType,
     NumberBaserowRuntimeFormulaArgumentType,
     TextBaserowRuntimeFormulaArgumentType,
     ThousandSeparatorBaserowRuntimeFormulaArgumentType,
@@ -98,7 +103,12 @@ class RuntimeAdd(RuntimeFormulaFunction):
             num = NumberBaserowRuntimeFormulaArgumentType()
             dt = DateTimeBaserowRuntimeFormulaArgumentType()
             td = TimedeltaBaserowRuntimeFormulaArgumentType()
+
             if num.test(a) and num.test(b):
+                return []
+            if td.test(a) and td.test(b):
+                return []
+            if (td.test(a) and num.test(b)) or (num.test(a) and td.test(b)):
                 return []
             if (dt.test(a) and td.test(b)) or (td.test(a) and dt.test(b)):
                 return []
@@ -106,7 +116,10 @@ class RuntimeAdd(RuntimeFormulaFunction):
                 return [(0, a)]
             if not (num.test(b) or dt.test(b) or td.test(b)):
                 return [(1, b)]
+
+            # Reject invalid pairs, e.g.: datetime + number, datetime + datetime, etc.
             return [(0, a)]
+
         return super().validate_type_of_args(args)
 
     def parse_args(self, args: FormulaArgs) -> FormulaArgs:
@@ -115,7 +128,14 @@ class RuntimeAdd(RuntimeFormulaFunction):
         return super().parse_args(args)
 
     def execute(self, context: FormulaContext, args: FormulaArgs):
-        return args[0] + args[1]
+        a, b = args
+
+        if isinstance(a, timedelta) and not isinstance(b, (datetime, timedelta)):
+            b = timedelta(seconds=b)
+        elif isinstance(b, timedelta) and not isinstance(a, (datetime, timedelta)):
+            a = timedelta(seconds=a)
+
+        return a + b
 
 
 class RuntimeMinus(RuntimeFormulaFunction):
@@ -132,13 +152,21 @@ class RuntimeMinus(RuntimeFormulaFunction):
             num = NumberBaserowRuntimeFormulaArgumentType()
             dt = DateTimeBaserowRuntimeFormulaArgumentType()
             td = TimedeltaBaserowRuntimeFormulaArgumentType()
+
             if num.test(a) and num.test(b):
+                return []
+            if td.test(a) and td.test(b):
+                return []
+            if (td.test(a) and num.test(b)) or (num.test(a) and td.test(b)):
                 return []
             if dt.test(a) and td.test(b):
                 return []
-            if not (num.test(a) or dt.test(a)):
+            if not (num.test(a) or dt.test(a) or td.test(a)):
                 return [(0, a)]
+
+            # Reject invalid pairs, e.g.: datetime - number, etc.
             return [(1, b)]
+
         return super().validate_type_of_args(args)
 
     def parse_args(self, args: FormulaArgs) -> FormulaArgs:
@@ -147,7 +175,14 @@ class RuntimeMinus(RuntimeFormulaFunction):
         return super().parse_args(args)
 
     def execute(self, context: FormulaContext, args: FormulaArgs):
-        return args[0] - args[1]
+        a, b = args
+
+        if isinstance(a, timedelta) and not isinstance(b, (datetime, timedelta)):
+            b = timedelta(seconds=b)
+        elif isinstance(b, timedelta) and not isinstance(a, (datetime, timedelta)):
+            a = timedelta(seconds=a)
+
+        return a - b
 
 
 class RuntimeMultiply(RuntimeFormulaFunction):
@@ -157,6 +192,29 @@ class RuntimeMultiply(RuntimeFormulaFunction):
         NumberBaserowRuntimeFormulaArgumentType(),
         NumberBaserowRuntimeFormulaArgumentType(),
     ]
+
+    def validate_type_of_args(self, args) -> list[tuple[int, FormulaArg]]:
+        if len(args) == 2:
+            a, b = args
+            num = NumberBaserowRuntimeFormulaArgumentType()
+            td = TimedeltaBaserowRuntimeFormulaArgumentType()
+
+            if num.test(a) and num.test(b):
+                return []
+            if (td.test(a) and num.test(b)) or (num.test(a) and td.test(b)):
+                return []
+            if not (num.test(a) or td.test(a)):
+                return [(0, a)]
+
+            # Reject invalid pairs, e.g.: datetime * number, etc.
+            return [(1, b)]
+
+        return super().validate_type_of_args(args)
+
+    def parse_args(self, args: FormulaArgs) -> FormulaArgs:
+        if any(isinstance(a, timedelta) for a in args):
+            return list(args)
+        return super().parse_args(args)
 
     def execute(self, context: FormulaContext, args: FormulaArgs):
         return args[0] * args[1]
@@ -169,6 +227,29 @@ class RuntimeDivide(RuntimeFormulaFunction):
         NumberBaserowRuntimeFormulaArgumentType(),
         NumberBaserowRuntimeFormulaArgumentType(),
     ]
+
+    def validate_type_of_args(self, args) -> list[tuple[int, FormulaArg]]:
+        if len(args) == 2:
+            a, b = args
+            num = NumberBaserowRuntimeFormulaArgumentType()
+            td = TimedeltaBaserowRuntimeFormulaArgumentType()
+
+            if num.test(a) and num.test(b):
+                return []
+            if td.test(a) and num.test(b):
+                return []
+            if not (num.test(a) or td.test(a)):
+                return [(0, a)]
+
+            # Reject invalid pairs, e.g.: datetime / number, etc.
+            return [(1, b)]
+
+        return super().validate_type_of_args(args)
+
+    def parse_args(self, args: FormulaArgs) -> FormulaArgs:
+        if any(isinstance(a, timedelta) for a in args):
+            return list(args)
+        return super().parse_args(args)
 
     def execute(self, context: FormulaContext, args: FormulaArgs):
         return args[0] / args[1]
@@ -723,10 +804,80 @@ class RuntimeNumberFormat(RuntimeFormulaFunction):
 class RuntimeToDuration(RuntimeFormulaFunction):
     type = "to_duration"
 
-    args = [DurationBaserowRuntimeFormulaArgumentType()]
+    args = [
+        DurationBaserowRuntimeFormulaArgumentType(),
+        DurationFormatBaserowRuntimeFormulaArgumentType(optional=True),
+    ]
+
+    def _format_error(self, value, duration_format):
+        return f"'{value}' could not be parsed using format '{duration_format}'."
+
+    def validate_type_of_args(self, args) -> list[tuple[int, FormulaArg]]:
+        # When a format is provided, arg 0's validity depends on the format.
+        # Defer checking arg 0 to validate_args() in that case.
+        if len(args) == 2:
+            if not self.args[1].test(args[1]):
+                return [(1, args[1])]
+            return []
+
+        return super().validate_type_of_args(args)
+
+    def validate_args(self, args, validation_context=None):
+        super().validate_args(args, validation_context)
+
+        if len(args) != 2:
+            return
+
+        value, duration_format = args
+        if isinstance(value, str):
+            if parse_value_with_duration_format(value, duration_format) is None:
+                raise BaserowFormulaSyntaxError(
+                    self._format_error(value, duration_format)
+                )
+
+    def parse_args(self, args: FormulaArgs) -> FormulaArgs:
+        # When the format arg is provided, defer parsing of the 1st arg to
+        # execute() so the raw value arg is checked later in combination
+        # with the format arg.
+        if len(args) == 2:
+            return [args[0], self.args[1].parse(args[1])]
+
+        return super().parse_args(args)
 
     def execute(self, context: FormulaContext, args: FormulaArgs):
+        if len(args) == 2:
+            value, duration_format = args
+            # Arg 0 may resolve to a timedelta at runtime (e.g. from a
+            # get() on a duration field), in which case it doesn't make sense
+            # to apply the format.
+            if isinstance(value, timedelta):
+                raise BaserowFormulaSyntaxError(
+                    "A duration format cannot be applied to a timedelta value."
+                )
+
+            result = parse_value_with_duration_format(value, duration_format)
+            if result is None:
+                raise BaserowFormulaSyntaxError(
+                    self._format_error(value, duration_format)
+                )
+            return result
+
         return args[0]
+
+
+class RuntimeDurationFormat(RuntimeFormulaFunction):
+    type = "duration_format"
+
+    args = [
+        DurationBaserowRuntimeFormulaArgumentType(),
+        DurationFormatBaserowRuntimeFormulaArgumentType(),
+    ]
+
+    def execute(self, context: FormulaContext, args: FormulaArgs):
+        duration, duration_format = args
+        if duration is None:
+            return None
+        return format_value_with_duration_format(duration, duration_format)
 
 
 class RuntimeToDatetime(RuntimeFormulaFunction):

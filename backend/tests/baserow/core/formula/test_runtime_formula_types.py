@@ -18,6 +18,7 @@ from baserow.core.formula.runtime_formula_types import (
     RuntimeDateTimeFormat,
     RuntimeDay,
     RuntimeDivide,
+    RuntimeDurationFormat,
     RuntimeEqual,
     RuntimeGenerateUUID,
     RuntimeGet,
@@ -2532,6 +2533,7 @@ def test_runtime_number_format_validate_args_raises_human_readable_error_for_bad
 @pytest.mark.parametrize(
     "args,expected",
     [
+        # Single-arg form: delegates to DurationBaserowRuntimeFormulaArgumentType.parse()
         (["1 day"], timedelta(days=1)),
         (["2 days"], timedelta(days=2)),
         (["3 weeks"], timedelta(weeks=3)),
@@ -2550,6 +2552,17 @@ def test_runtime_number_format_validate_args_raises_human_readable_error_for_bad
         (["12.5"], timedelta(seconds=12.5)),
         (["0 days"], timedelta(0)),
         (["-1:30"], timedelta(seconds=-90)),
+        # Two-arg form: value + format string
+        (["1:30", "h:mm"], timedelta(hours=1, minutes=30)),
+        (
+            ["1:23:45", "h:mm:ss"],
+            timedelta(hours=1, minutes=23, seconds=45),
+        ),
+        (
+            ["2 3:04:05", "d h:mm:ss"],
+            timedelta(days=2, hours=3, minutes=4, seconds=5),
+        ),
+        (["-1:30", "h:mm"], -timedelta(hours=1, minutes=30)),
     ],
 )
 def test_runtime_to_duration_execute(args, expected):
@@ -2558,17 +2571,42 @@ def test_runtime_to_duration_execute(args, expected):
     assert result == expected
 
 
+def test_runtime_to_duration_execute_raises_for_timedelta_with_format():
+    # At runtime, arg 0 may resolve to a timedelta (e.g. via a get() on a
+    # duration field), in which case applying a format doesn't make sense.
+    parsed_args = RuntimeToDuration().parse_args([timedelta(hours=1), "h:mm"])
+    with pytest.raises(BaserowFormulaSyntaxError) as exc_info:
+        RuntimeToDuration().execute({}, parsed_args)
+    assert "A duration format cannot be applied to a timedelta" in str(exc_info.value)
+
+
+def test_runtime_to_duration_execute_raises_when_value_does_not_match_format():
+    parsed_args = RuntimeToDuration().parse_args(["not a duration", "h:mm"])
+    with pytest.raises(BaserowFormulaSyntaxError) as exc_info:
+        RuntimeToDuration().execute({}, parsed_args)
+    assert "could not be parsed using format 'h:mm'" in str(exc_info.value)
+
+
 @pytest.mark.parametrize(
     "args,expected",
     [
-        # Valid duration strings — arg passes
+        # Single-arg form
         (["1 day"], []),
         (["2 days"], []),
         ([1], []),
-        # Invalid strings — arg is returned as invalid
+        # Invalid single-arg — arg is returned as invalid
         (["foo"], [(0, "foo")]),
         ([""], [(0, "")]),
         ([None], [(0, None)]),
+        # Two-arg form: arg 0 check is deferred to validate_args(), so any
+        # arg 0 is accepted at this stage when the format is valid.
+        (["1:30", "h:mm"], []),
+        (["whatever", "h:mm"], []),
+        # Invalid format strings → arg 1 reported as invalid
+        (["1:30", ":::"], [(1, ":::")]),
+        (["1:30", "h h"], [(1, "h h")]),
+        (["1:30", ""], [(1, "")]),
+        (["1:30", 123], [(1, 123)]),
     ],
 )
 def test_runtime_to_duration_validate_type_of_args(args, expected):
@@ -2581,11 +2619,86 @@ def test_runtime_to_duration_validate_type_of_args(args, expected):
     [
         ([], False),
         (["1 day"], True),
-        (["1 day", "extra"], False),
+        (["1 day", "h:mm"], True),
+        (["1 day", "h:mm", "extra"], False),
     ],
 )
 def test_runtime_to_duration_validate_number_of_args(args, expected):
     result = RuntimeToDuration().validate_number_of_args(args)
+    assert result is expected
+
+
+def test_runtime_to_duration_validate_args_raises_when_value_does_not_match_format():
+    with pytest.raises(BaserowFormulaSyntaxError) as exc_info:
+        RuntimeToDuration().validate_args(["not a duration", "h:mm"])
+    assert "could not be parsed using format 'h:mm'" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        ([timedelta(hours=1, minutes=30), "h:mm"], "1:30"),
+        (
+            [timedelta(hours=1, minutes=23, seconds=45), "h:mm:ss"],
+            "1:23:45",
+        ),
+        (
+            [timedelta(days=2, hours=3, minutes=4, seconds=5), "d h:mm:ss"],
+            "2 3:04:05",
+        ),
+        # rollup variations
+        ([timedelta(hours=1, minutes=30), "mm:ss"], "90:00"),
+        ([timedelta(hours=25, minutes=30), "h:mm"], "25:30"),
+        ([timedelta(hours=25, minutes=30), "d h:mm"], "1 1:30"),
+        # negative durations
+        ([-timedelta(hours=1, minutes=30), "h:mm"], "-1:30"),
+        # zero duration
+        ([timedelta(0), "h:mm"], "0:00"),
+    ],
+)
+def test_runtime_duration_format_execute(args, expected):
+    parsed_args = RuntimeDurationFormat().parse_args(args)
+    result = RuntimeDurationFormat().execute({}, parsed_args)
+    assert result == expected
+
+
+def test_runtime_duration_format_execute_returns_none_for_null_duration():
+    result = RuntimeDurationFormat().execute({}, [None, "h:mm"])
+    assert result is None
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        ([timedelta(hours=1), "h:mm"], []),
+        ([timedelta(0), "d h:mm:ss"], []),
+        # arg 0 must be a duration/timedelta-coercible value
+        (["not a duration", "h:mm"], [(0, "not a duration")]),
+        ([123, "h:mm"], []),
+        ([None, "h:mm"], [(0, None)]),
+        # arg 1 must be a valid format string
+        ([timedelta(hours=1), ":::"], [(1, ":::")]),
+        ([timedelta(hours=1), "h h"], [(1, "h h")]),
+        ([timedelta(hours=1), ""], [(1, "")]),
+        ([timedelta(hours=1), 123], [(1, 123)]),
+    ],
+)
+def test_runtime_duration_format_validate_type_of_args(args, expected):
+    result = RuntimeDurationFormat().validate_type_of_args(args)
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        ([], False),
+        ([timedelta(hours=1)], False),
+        ([timedelta(hours=1), "h:mm"], True),
+        ([timedelta(hours=1), "h:mm", "extra"], False),
+    ],
+)
+def test_runtime_duration_format_validate_number_of_args(args, expected):
+    result = RuntimeDurationFormat().validate_number_of_args(args)
     assert result is expected
 
 
@@ -2604,6 +2717,17 @@ def test_runtime_to_duration_validate_number_of_args(args, expected):
             [datetime(2025, 6, 15), timedelta(hours=3)],
             datetime(2025, 6, 15, 3, 0, 0),
         ),
+        # timedelta + timedelta
+        (
+            [timedelta(hours=1), timedelta(minutes=30)],
+            timedelta(hours=1, minutes=30),
+        ),
+        # timedelta + number (number = seconds)
+        ([timedelta(hours=1), 60], timedelta(hours=1, seconds=60)),
+        # number + timedelta (number = seconds)
+        ([60, timedelta(hours=1)], timedelta(hours=1, seconds=60)),
+        # fractional seconds
+        ([timedelta(seconds=1), 1.5], timedelta(seconds=2, microseconds=500000)),
     ],
 )
 def test_runtime_add_with_datetime_and_timedelta(args, expected):
@@ -2617,8 +2741,16 @@ def test_runtime_add_with_datetime_and_timedelta(args, expected):
     [
         ([datetime(2025, 1, 1, 12, 0, 0), timedelta(days=1)], []),
         ([timedelta(days=1), datetime(2025, 1, 1, 12, 0, 0)], []),
-        ([timedelta(days=1), timedelta(days=2)], [(0, timedelta(days=1))]),
+        ([timedelta(days=1), timedelta(days=2)], []),
+        ([timedelta(days=1), 60], []),
+        ([60, timedelta(days=1)], []),
         (["foo", timedelta(days=1)], [(0, "foo")]),
+        ([timedelta(days=1), "foo"], [(1, "foo")]),
+        # datetime + datetime is invalid
+        (
+            [datetime(2025, 1, 1), datetime(2025, 1, 2)],
+            [(0, datetime(2025, 1, 1))],
+        ),
     ],
 )
 def test_runtime_add_validate_type_of_args_with_timedelta(args, expected):
@@ -2637,6 +2769,15 @@ def test_runtime_add_validate_type_of_args_with_timedelta(args, expected):
             [datetime(2025, 6, 15, 3, 0, 0), timedelta(hours=3)],
             datetime(2025, 6, 15, 0, 0, 0),
         ),
+        # timedelta - timedelta
+        (
+            [timedelta(hours=2), timedelta(minutes=30)],
+            timedelta(hours=1, minutes=30),
+        ),
+        # timedelta - number (number = seconds)
+        ([timedelta(seconds=30), 1], timedelta(seconds=29)),
+        # number - timedelta (number = seconds)
+        ([90, timedelta(seconds=30)], timedelta(seconds=60)),
     ],
 )
 def test_runtime_minus_with_datetime_and_timedelta(args, expected):
@@ -2649,13 +2790,114 @@ def test_runtime_minus_with_datetime_and_timedelta(args, expected):
     "args,expected",
     [
         ([datetime(2025, 1, 2, 12, 0, 0), timedelta(days=1)], []),
-        ([timedelta(days=1), datetime(2025, 1, 1, 12, 0, 0)], [(0, timedelta(days=1))]),
-        ([timedelta(days=1), timedelta(days=2)], [(0, timedelta(days=1))]),
+        (
+            [timedelta(days=1), datetime(2025, 1, 1, 12, 0, 0)],
+            [(1, datetime(2025, 1, 1, 12, 0, 0))],
+        ),
+        ([timedelta(days=1), timedelta(days=2)], []),
+        ([timedelta(days=1), 60], []),
+        ([60, timedelta(days=1)], []),
         (["foo", timedelta(days=1)], [(0, "foo")]),
+        ([timedelta(days=1), "foo"], [(1, "foo")]),
+        # datetime - datetime is invalid
+        (
+            [datetime(2025, 1, 2), datetime(2025, 1, 1)],
+            [(1, datetime(2025, 1, 1))],
+        ),
+        # datetime - number is invalid
+        ([datetime(2025, 1, 1), 5], [(1, 5)]),
+        # number - datetime is invalid
+        ([5, datetime(2025, 1, 1)], [(1, datetime(2025, 1, 1))]),
     ],
 )
 def test_runtime_minus_validate_type_of_args_with_timedelta(args, expected):
     result = RuntimeMinus().validate_type_of_args(args)
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        # timedelta * number
+        ([timedelta(hours=1), 2], timedelta(hours=2)),
+        # number * timedelta
+        ([2, timedelta(hours=1)], timedelta(hours=2)),
+        # fractional scaling
+        ([timedelta(minutes=10), 0.5], timedelta(minutes=5)),
+    ],
+)
+def test_runtime_multiply_with_timedelta(args, expected):
+    parsed_args = RuntimeMultiply().parse_args(args)
+    result = RuntimeMultiply().execute({}, parsed_args)
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        ([1, 2], []),
+        ([timedelta(hours=1), 2], []),
+        ([2, timedelta(hours=1)], []),
+        # timedelta * timedelta is invalid
+        (
+            [timedelta(hours=1), timedelta(hours=1)],
+            [(1, timedelta(hours=1))],
+        ),
+        (["foo", timedelta(hours=1)], [(0, "foo")]),
+        ([timedelta(hours=1), "foo"], [(1, "foo")]),
+        # datetime operands are invalid for multiply
+        ([datetime(2025, 1, 1), 2], [(0, datetime(2025, 1, 1))]),
+        ([2, datetime(2025, 1, 1)], [(1, datetime(2025, 1, 1))]),
+        (
+            [datetime(2025, 1, 1), timedelta(hours=1)],
+            [(0, datetime(2025, 1, 1))],
+        ),
+    ],
+)
+def test_runtime_multiply_validate_type_of_args_with_timedelta(args, expected):
+    result = RuntimeMultiply().validate_type_of_args(args)
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        # timedelta / number
+        ([timedelta(hours=1), 2], timedelta(minutes=30)),
+        ([timedelta(seconds=30), 2], timedelta(seconds=15)),
+    ],
+)
+def test_runtime_divide_with_timedelta(args, expected):
+    parsed_args = RuntimeDivide().parse_args(args)
+    result = RuntimeDivide().execute({}, parsed_args)
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        ([1, 2], []),
+        ([timedelta(hours=1), 2], []),
+        # number / timedelta is invalid
+        ([2, timedelta(hours=1)], [(1, timedelta(hours=1))]),
+        # timedelta / timedelta is invalid
+        (
+            [timedelta(hours=1), timedelta(hours=1)],
+            [(1, timedelta(hours=1))],
+        ),
+        (["foo", timedelta(hours=1)], [(0, "foo")]),
+        ([timedelta(hours=1), "foo"], [(1, "foo")]),
+        # datetime operands are invalid for divide
+        ([datetime(2025, 1, 1), 2], [(0, datetime(2025, 1, 1))]),
+        ([2, datetime(2025, 1, 1)], [(1, datetime(2025, 1, 1))]),
+        (
+            [datetime(2025, 1, 1), timedelta(hours=1)],
+            [(0, datetime(2025, 1, 1))],
+        ),
+    ],
+)
+def test_runtime_divide_validate_type_of_args_with_timedelta(args, expected):
+    result = RuntimeDivide().validate_type_of_args(args)
     assert result == expected
 
 

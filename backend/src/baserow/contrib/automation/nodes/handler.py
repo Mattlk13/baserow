@@ -21,6 +21,7 @@ from baserow.contrib.automation.history.exceptions import (
 from baserow.contrib.automation.history.handler import AutomationHistoryHandler
 from baserow.contrib.automation.history.models import (
     AutomationNodeHistory,
+    AutomationWorkflowHistory,
 )
 from baserow.contrib.automation.models import AutomationWorkflow
 from baserow.contrib.automation.nodes.exceptions import (
@@ -32,7 +33,11 @@ from baserow.contrib.automation.nodes.node_types import (
     AutomationNodeType,
 )
 from baserow.contrib.automation.nodes.registries import automation_node_type_registry
-from baserow.contrib.automation.nodes.signals import automation_node_updated
+from baserow.contrib.automation.nodes.signals import (
+    automation_node_dispatch_completed,
+    automation_node_dispatch_started,
+    automation_node_updated,
+)
 from baserow.contrib.automation.nodes.tasks import (
     dispatch_node_celery_task,
 )
@@ -405,6 +410,32 @@ class AutomationNodeHandler(metaclass=baserow_trace_methods(tracer)):
 
         return False
 
+    def _before_node_dispatch(
+        self, node: AutomationNode, workflow_history: AutomationWorkflowHistory
+    ) -> None:
+        """
+        Sends a signal before a node is dispatched.
+        """
+
+        automation_node_dispatch_started.send(
+            sender=self,
+            node=node,
+            workflow_history=workflow_history,
+        )
+
+    def _after_node_dispatch(
+        self, node: AutomationNode, node_history: AutomationNodeHistory
+    ) -> None:
+        """
+        Sends a signal after a node is dispatched.
+        """
+
+        automation_node_dispatch_completed.send(
+            sender=self,
+            node=node,
+            node_history=node_history,
+        )
+
     def dispatch_node(
         self,
         node_id: int,
@@ -481,6 +512,7 @@ class AutomationNodeHandler(metaclass=baserow_trace_methods(tracer)):
         node_type: Type[AutomationNodeActionNodeType] = node.get_type()
 
         try:
+            self._before_node_dispatch(node, workflow_history)
             dispatch_result = node_type.dispatch(node, dispatch_context)
         except ServiceImproperlyConfiguredDispatchException as e:
             error = f"The node is misconfigured and cannot be dispatched. {str(e)}"
@@ -513,11 +545,23 @@ class AutomationNodeHandler(metaclass=baserow_trace_methods(tracer)):
         if self._handle_simulation_notify(simulate_until_node, node):
             return None
 
+        # Mark the node history as completed, so that post-dispatch hooks
+        # can accurately rely on the completed_on field.
+        now = timezone.now()
+        node_history.completed_on = now
+        node_history.status = HistoryStatusChoices.SUCCESS
+        node_history.save()
+
+        # The post-dispatch hook should also be able to safely access the
+        # node result, since the dispatch is considered completed, so this
+        # should also come before the post-dispatch hook.
         history_handler.create_node_result(
             node_history=node_history,
             result=dispatch_result.data,
             iteration_path=iteration_path,
         )
+
+        self._after_node_dispatch(node, node_history)
 
         to_chain = []
         if children := node.get_children():
@@ -549,11 +593,6 @@ class AutomationNodeHandler(metaclass=baserow_trace_methods(tracer)):
             if groups_to_chain:
                 canvas = chain(*groups_to_chain)
                 to_chain.append(canvas)
-
-        now = timezone.now()
-        node_history.completed_on = now
-        node_history.status = HistoryStatusChoices.SUCCESS
-        node_history.save()
 
         # Handle non-iterator nodes, including iterator children.
         next_nodes = node.get_next_nodes(dispatch_result.output_uid)

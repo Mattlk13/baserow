@@ -345,6 +345,9 @@ async function submit() {
     const value = valuesCopy[valueName]
     const ref = form.value?.$refs?.['field-' + field.field.id]?.[0]
 
+    // Check required at the field-type level, not via the component's
+    // isValid(): some components (e.g. duration) only flag an error once the
+    // user types, so an untouched empty value would otherwise submit.
     if (
       (field.required && fieldType.isEmpty(field.field, value)) ||
       fieldType.getValidationError(field.field, value) !== null ||

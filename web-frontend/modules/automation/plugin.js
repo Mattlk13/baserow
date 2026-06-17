@@ -18,6 +18,7 @@ import {
   LocalBaserowRowsCreatedTriggerNodeType,
   LocalBaserowRowsUpdatedTriggerNodeType,
   LocalBaserowRowsDeletedTriggerNodeType,
+  LocalBaserowFieldsUpdatedTriggerNodeType,
   CoreHTTPTriggerNodeType,
   LocalBaserowAggregateRowsActionNodeType,
   CoreCSVFileReaderNodeType,
@@ -97,6 +98,10 @@ export default defineNuxtPlugin({
     $registry.register(
       'node',
       new LocalBaserowRowsDeletedTriggerNodeType(context)
+    )
+    $registry.register(
+      'node',
+      new LocalBaserowFieldsUpdatedTriggerNodeType(context)
     )
     $registry.register('node', new CoreHTTPTriggerNodeType(context))
     $registry.register('node', new LocalBaserowCreateRowActionNodeType(context))

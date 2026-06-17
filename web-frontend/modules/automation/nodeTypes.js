@@ -12,6 +12,7 @@ import {
   LocalBaserowRowsCreatedTriggerServiceType,
   LocalBaserowRowsDeletedTriggerServiceType,
   LocalBaserowRowsUpdatedTriggerServiceType,
+  LocalBaserowFieldsUpdatedTriggerServiceType,
   LocalBaserowGetRowServiceType,
   LocalBaserowListRowsServiceType,
   LocalBaserowAggregateRowsServiceType,
@@ -381,6 +382,70 @@ export class LocalBaserowRowsUpdatedTriggerNodeType extends TriggerNodeTypeMixin
   }
 }
 
+export class LocalBaserowFieldsUpdatedTriggerNodeType extends TriggerNodeTypeMixin(
+  LocalBaserowSignalTriggerType
+) {
+  static getType() {
+    return 'local_baserow_fields_updated'
+  }
+
+  getOrder() {
+    return 3
+  }
+
+  get labelTemplateName() {
+    return 'nodeType.localBaserowFieldsUpdatedLabel'
+  }
+
+  get serviceType() {
+    return this.app.$registry.get(
+      'service',
+      LocalBaserowFieldsUpdatedTriggerServiceType.getType()
+    )
+  }
+
+  /**
+   * Resolves the names of the watched fields from the service schema, which
+   * carries each field's metadata (including its name). Returns an empty array
+   * when no field is selected, or their metadata isn't available yet.
+   */
+  getFieldNames(node) {
+    const fieldIds = node.service?.field_ids || []
+    if (fieldIds.length === 0) {
+      return []
+    }
+    const properties = node.service?.schema?.items?.properties || {}
+    const nameById = {}
+    for (const property of Object.values(properties)) {
+      if (property?.metadata?.id) {
+        nameById[property.metadata.id] = property.metadata.name
+      }
+    }
+    return fieldIds.map((id) => nameById[id]).filter(Boolean)
+  }
+
+  getDefaultLabel({ automation, node }) {
+    const { tableName } = this.getLabelContext({ automation, node })
+    const fieldIds = node.service?.field_ids || []
+
+    if (fieldIds.length === 0 || !tableName) {
+      return this.app.$i18n.t('nodeType.localBaserowFieldsUpdatedNoFieldLabel')
+    }
+
+    if (fieldIds.length === 1) {
+      return this.app.$i18n.t('nodeType.localBaserowFieldsUpdatedLabel', {
+        fieldName: this.getFieldNames(node)[0],
+        tableName,
+      })
+    }
+
+    return this.app.$i18n.t('nodeType.localBaserowFieldsUpdatedMultipleLabel', {
+      count: fieldIds.length,
+      tableName,
+    })
+  }
+}
+
 export class LocalBaserowRowsDeletedTriggerNodeType extends TriggerNodeTypeMixin(
   LocalBaserowSignalTriggerType
 ) {
@@ -389,7 +454,7 @@ export class LocalBaserowRowsDeletedTriggerNodeType extends TriggerNodeTypeMixin
   }
 
   getOrder() {
-    return 3
+    return 4
   }
 
   get labelTemplateName() {

@@ -276,11 +276,19 @@ export class NodeType extends Registerable {
   }
 
   isDeactivatedReason({ workspace }) {
+    const serviceReason = this.serviceType.isDeactivatedReason({ workspace })
+    if (serviceReason) {
+      return serviceReason
+    }
     return null
   }
 
   isDeactivated({ workspace }) {
     return !!this.isDeactivatedReason({ workspace })
+  }
+
+  getDeactivatedClickModal({ workspace }) {
+    return this.serviceType.getDeactivatedClickModal({ workspace })
   }
 }
 

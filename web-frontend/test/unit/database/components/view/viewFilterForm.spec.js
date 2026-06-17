@@ -4,13 +4,20 @@ import flushPromises from 'flush-promises'
 
 import ViewFilterForm from '@baserow/modules/database/components/view/ViewFilterForm.vue'
 
-// Mock the uuid functions to return a predictable value
+// Mock UUID helpers predictably while keeping exports the store/tests need (`generateUUID` for undo).
 let nextFilterUuid = 100
 const mockUuid = () => nextFilterUuid++
 
-vi.mock('@baserow/modules/core/utils/string', () => ({
-  uuid: () => mockUuid(),
-}))
+vi.mock('@baserow/modules/core/utils/string', async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    uuid: () => mockUuid(),
+    // Used by createNewUndoRedoActionGroupId in createFilter
+    generateUUID: () =>
+      `00000000-0000-4000-a000-${mockUuid().toString().padStart(12, '0')}`,
+  }
+})
 
 vi.mock('uuid', () => ({
   v1: () => mockUuid(),

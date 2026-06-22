@@ -77,6 +77,13 @@ exports[`User Admin Component Tests > A users attributes will be displayed 1`] =
               </div>
             </div>
           </th>
+          <th style="" class="data-table__table-cell data-table__table-cell--header">
+            <div class="data-table__table-cell-head">
+              <div>usersAdminTable.twoFactorAuth
+                <!--v-if-->
+              </div>
+            </div>
+          </th>
           <th style="" class="data-table__table-cell data-table__table-cell--header data-table__table-cell--sticky-right">
             <div class="data-table__table-cell-head">
               <div>
@@ -130,8 +137,13 @@ exports[`User Admin Component Tests > A users attributes will be displayed 1`] =
           </td>
           <td class="data-table__table-cell data-table__table-cell--is_active">
             <div class="data-table__table-cell-content">
-              <div>
-                <div class="user-admin-active"><i class="iconoir-check user-admin-active__icon user-admin-active__icon--activated"></i> user.active</div>
+              <div class="user-admin-active"><i class="iconoir-check user-admin-active__icon user-admin-active__icon--activated"></i></div>
+            </div>
+          </td>
+          <td class="data-table__table-cell data-table__table-cell--two_factor_auth">
+            <div class="data-table__table-cell-content">
+              <div class="badge badge--neutral badge--regular badge--rounded">
+                <!--v-if--><span class="badge__label"><span>twoFactorAuthField.disabled</span></span>
               </div>
             </div>
           </td>
@@ -234,6 +246,13 @@ exports[`User Admin Component Tests > you can sort by multiple columns which wil
               </div>
             </div>
           </th>
+          <th style="" class="data-table__table-cell data-table__table-cell--header">
+            <div class="data-table__table-cell-head">
+              <div>usersAdminTable.twoFactorAuth
+                <!--v-if-->
+              </div>
+            </div>
+          </th>
           <th style="" class="data-table__table-cell data-table__table-cell--header data-table__table-cell--sticky-right">
             <div class="data-table__table-cell-head">
               <div>
@@ -287,8 +306,13 @@ exports[`User Admin Component Tests > you can sort by multiple columns which wil
           </td>
           <td class="data-table__table-cell data-table__table-cell--is_active">
             <div class="data-table__table-cell-content">
-              <div>
-                <div class="user-admin-active"><i class="iconoir-check user-admin-active__icon user-admin-active__icon--activated"></i> user.active</div>
+              <div class="user-admin-active"><i class="iconoir-check user-admin-active__icon user-admin-active__icon--activated"></i></div>
+            </div>
+          </td>
+          <td class="data-table__table-cell data-table__table-cell--two_factor_auth">
+            <div class="data-table__table-cell-content">
+              <div class="badge badge--neutral badge--regular badge--rounded">
+                <!--v-if--><span class="badge__label"><span>twoFactorAuthField.disabled</span></span>
               </div>
             </div>
           </td>
@@ -341,8 +365,13 @@ exports[`User Admin Component Tests > you can sort by multiple columns which wil
           </td>
           <td class="data-table__table-cell data-table__table-cell--is_active">
             <div class="data-table__table-cell-content">
-              <div>
-                <div class="user-admin-active"><i class="iconoir-check user-admin-active__icon user-admin-active__icon--activated"></i> user.active</div>
+              <div class="user-admin-active"><i class="iconoir-check user-admin-active__icon user-admin-active__icon--activated"></i></div>
+            </div>
+          </td>
+          <td class="data-table__table-cell data-table__table-cell--two_factor_auth">
+            <div class="data-table__table-cell-content">
+              <div class="badge badge--neutral badge--regular badge--rounded">
+                <!--v-if--><span class="badge__label"><span>twoFactorAuthField.disabled</span></span>
               </div>
             </div>
           </td>
@@ -395,8 +424,13 @@ exports[`User Admin Component Tests > you can sort by multiple columns which wil
           </td>
           <td class="data-table__table-cell data-table__table-cell--is_active">
             <div class="data-table__table-cell-content">
-              <div>
-                <div class="user-admin-active"><i class="iconoir-check user-admin-active__icon user-admin-active__icon--activated"></i> user.active</div>
+              <div class="user-admin-active"><i class="iconoir-check user-admin-active__icon user-admin-active__icon--activated"></i></div>
+            </div>
+          </td>
+          <td class="data-table__table-cell data-table__table-cell--two_factor_auth">
+            <div class="data-table__table-cell-content">
+              <div class="badge badge--neutral badge--regular badge--rounded">
+                <!--v-if--><span class="badge__label"><span>twoFactorAuthField.disabled</span></span>
               </div>
             </div>
           </td>

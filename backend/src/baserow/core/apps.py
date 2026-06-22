@@ -387,6 +387,18 @@ class CoreConfig(AppConfig):
         action_type_registry.register(SendChangeEmailConfirmationActionType())
         action_type_registry.register(ChangeEmailActionType())
 
+        from baserow.core.admin.users.actions import (
+            AdminDisableTwoFactorAuthActionType,
+        )
+        from baserow.core.two_factor_auth.actions import (
+            ConfigureTwoFactorAuthActionType,
+            DisableTwoFactorAuthActionType,
+        )
+
+        action_type_registry.register(ConfigureTwoFactorAuthActionType())
+        action_type_registry.register(DisableTwoFactorAuthActionType())
+        action_type_registry.register(AdminDisableTwoFactorAuthActionType())
+
         from baserow.core.action.scopes import (
             ApplicationActionScopeType,
             RootActionScopeType,

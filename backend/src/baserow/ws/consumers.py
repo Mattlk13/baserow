@@ -1,14 +1,30 @@
 from dataclasses import dataclass
 from operator import attrgetter
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
+from loguru import logger
 
+from baserow.config.settings.utils import try_int
+from baserow.ws.realtime_events import (
+    FIRST_CONNECT_CURSOR,
+    NO_REPLAY_AVAILABLE,
+    RealtimeEventHandler,
+    ReplayEventsResult,
+)
 from baserow.ws.registries import PageType, page_registry
 
 if TYPE_CHECKING:
     from django.contrib.auth.models import AbstractUser
+
+    from baserow.ws.models import RealtimeEvent
+    from baserow.ws.types import (
+        BroadcastToChannelGroupMessage,
+        BroadcastToUsersIndividualPayloadsMessage,
+        BroadcastToUsersMessage,
+        ForceDisconnectMessage,
+    )
 
 
 @dataclass
@@ -36,7 +52,7 @@ class PageScope:
     """
 
     page_type: str
-    page_parameters: dict[str, any]
+    page_parameters: dict[str, Any]
 
 
 class SubscribedPages:
@@ -132,13 +148,15 @@ class CoreConsumer(AsyncJsonWebsocketConsumer):
         await self.accept()
 
         user = self.scope["user"]
-        web_socket_id = self.scope["web_socket_id"]
-
         await self.send_json(
             {
                 "type": "authentication",
                 "success": user is not None,
-                "web_socket_id": web_socket_id,
+                # Kept for backwards compatibility.
+                "web_socket_id": self.scope["web_socket_id"],
+                "replay_enabled": user is not None
+                and getattr(user, "is_authenticated", False)
+                and RealtimeEventHandler.is_recording_enabled(),
             }
         )
 
@@ -157,6 +175,11 @@ class CoreConsumer(AsyncJsonWebsocketConsumer):
         """
         Processes incoming messages.
         """
+        msg_type = content.get("type", "")
+
+        if msg_type == "replay_events":
+            await self._handle_replay_events(content)
+            return
 
         if "page" in content:
             await self._add_page_scope(content)
@@ -330,9 +353,127 @@ class CoreConsumer(AsyncJsonWebsocketConsumer):
                     }
                     await self._remove_page_scope(content, send_confirmation=True)
 
+    async def _replay_persisted_events(self, events: list["RealtimeEvent"]) -> bool:
+        """
+        Re-deliver persisted events through the normal broadcast handlers.
+
+        :param events: Ordered events to replay to this websocket connection.
+        :return: Whether every event could be replayed. If False, the client should be
+            forced to refresh because some events could not be replayed.
+        """
+
+        replay_plan = []
+        for event in events:
+            event_type = event.payload.get("type", "")
+            if not isinstance(event_type, str) or not event_type.startswith(
+                "broadcast_to_"
+            ):
+                logger.bind(
+                    realtime_event_id=event.id,
+                    channel_group=event.channel_group,
+                    event_type=event_type,
+                ).error("Cannot replay realtime event with unsupported payload type.")
+                return False
+
+            handler = getattr(self, event_type, None)
+            if handler is None:
+                logger.bind(
+                    realtime_event_id=event.id,
+                    channel_group=event.channel_group,
+                    event_type=event_type,
+                ).error("Cannot replay realtime event because its handler is missing.")
+                return False
+
+            replay_plan.append((event, handler))
+
+        for event, handler in replay_plan:
+            RealtimeEventHandler.add_event_id_to_payload(event.id, event.payload)
+            await handler(event.payload)
+
+        return True
+
+    @staticmethod
+    def _parse_last_seen_id(content: dict) -> int:
+        """
+        Extract and validate the ``last_seen_id`` cursor from a
+        ``replay_events`` message. Values below ``NO_REPLAY_AVAILABLE``
+        are normalised to ``FIRST_CONNECT_CURSOR`` (safe default).
+
+        :param content: The JSON payload sent by the websocket client.
+        :return: ``FIRST_CONNECT_CURSOR`` for a fresh session or
+            missing/invalid input, ``NO_REPLAY_AVAILABLE`` when the client
+            has no usable high-water mark, or the positive event id the
+            client last processed.
+        """
+
+        last_seen_id = try_int(content.get("last_seen_id"))
+        if last_seen_id is None or last_seen_id < NO_REPLAY_AVAILABLE:
+            return FIRST_CONNECT_CURSOR
+        return last_seen_id
+
+    async def _send_replay_events_result(self, result: ReplayEventsResult) -> None:
+        """
+        Send the replay decision to the websocket client.
+
+        :param result: The replay decision produced by ``RealtimeEventHandler``.
+        """
+
+        await self.send_json(
+            {
+                "type": "replay_events_result",
+                "force_refresh": result.force_refresh,
+                "latest_event_id": result.latest_event_id,
+            }
+        )
+
+    async def _handle_replay_events(self, content: dict):
+        """
+        Handle ``replay_events`` from the frontend.
+
+        Visible outcomes: baseline (``FIRST_CONNECT_CURSOR``), replay since
+        ``last_seen_id``, or ``force_refresh=true`` when the gap is too
+        large, the cursor expired, the client has no high-water mark,
+        replay failed mid-flight, or recording is disabled.
+        Silent drops: unauthenticated requests only.
+        """
+
+        user = self.scope.get("user")
+        if user is None or not getattr(user, "is_authenticated", False):
+            return
+
+        if not RealtimeEventHandler.is_recording_enabled():
+            await self._send_replay_events_result(
+                ReplayEventsResult(
+                    force_refresh=True,
+                    latest_event_id=NO_REPLAY_AVAILABLE,
+                    replay_events=[],
+                )
+            )
+            return
+
+        last_seen_id = self._parse_last_seen_id(content)
+        web_socket_id = self.scope.get("web_socket_id")
+
+        pages = self.scope.get("pages", SubscribedPages())
+        page_group_names = RealtimeEventHandler.get_page_group_names(pages)
+
+        result = await database_sync_to_async(
+            RealtimeEventHandler.get_replay_events_result
+        )(user.id, page_group_names, last_seen_id, web_socket_id)
+
+        if result.replay_events and not await self._replay_persisted_events(
+            result.replay_events
+        ):
+            result = ReplayEventsResult(
+                force_refresh=True,
+                latest_event_id=NO_REPLAY_AVAILABLE,
+                replay_events=[],
+            )
+        await self._send_replay_events_result(result)
+
     # Event handlers
 
-    async def force_disconnect_users(self, event):
+    async def force_disconnect_users(self, event: "ForceDisconnectMessage"):
         """
         Closes the connection with this user if their user id is in the provided
         list.
@@ -355,7 +496,7 @@ class CoreConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"type": "force_disconnect"})
             return await self.close()
 
-    async def broadcast_to_users(self, event):
+    async def broadcast_to_users(self, event: "BroadcastToUsersMessage"):
         """
         Broadcasts a message to all the users that are in the provided user_ids list.
         Optionally the ignore_web_socket_id is ignored because that is often the
@@ -365,22 +506,24 @@ class CoreConsumer(AsyncJsonWebsocketConsumer):
 
         :param event: The event containing the payload, user ids and the web socket
             id that must be ignored.
-        :type event: dict
         """
 
         web_socket_id = self.scope["web_socket_id"]
         payload = event["payload"]
-        user_ids = event["user_ids"]
         ignore_web_socket_id = event["ignore_web_socket_id"]
-        send_to_all_users = event["send_to_all_users"]
 
         shouldnt_ignore = (
             not ignore_web_socket_id or ignore_web_socket_id != web_socket_id
         )
-        if shouldnt_ignore and (self.scope["user"].id in user_ids or send_to_all_users):
+        if shouldnt_ignore and RealtimeEventHandler.should_deliver_users_channel_event(
+            self.scope["user"].id,
+            event,
+        ):
             await self.send_json(payload)
 
-    async def broadcast_to_users_individual_payloads(self, event):
+    async def broadcast_to_users_individual_payloads(
+        self, event: "BroadcastToUsersIndividualPayloadsMessage"
+    ):
         """
         Accepts a payload mapping and sends the payload as JSON if the user_id of the
         consumer is part of the mapping provided
@@ -399,16 +542,18 @@ class CoreConsumer(AsyncJsonWebsocketConsumer):
             not ignore_web_socket_id or ignore_web_socket_id != web_socket_id
         )
 
-        if shouldnt_ignore and user_id in payload_map:
+        if shouldnt_ignore and RealtimeEventHandler.should_deliver_users_channel_event(
+            self.scope["user"].id,
+            event,
+        ):
             await self.send_json(payload_map[user_id])
 
-    async def broadcast_to_group(self, event):
+    async def broadcast_to_group(self, event: "BroadcastToChannelGroupMessage"):
         """
         Broadcasts a message to all the users that are in the provided group name.
 
         :param event: The event containing the payload, group name and the web socket
             id that must be ignored.
-        :type event: dict
         """
 
         web_socket_id = self.scope["web_socket_id"]

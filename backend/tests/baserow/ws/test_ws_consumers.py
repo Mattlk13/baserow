@@ -6,6 +6,7 @@ from channels.testing import WebsocketCommunicator
 from baserow.config.asgi import application
 from baserow.ws.auth import ANONYMOUS_USER_TOKEN
 from baserow.ws.consumers import CoreConsumer, PageContext, PageScope, SubscribedPages
+from baserow.ws.realtime_events import FIRST_CONNECT_CURSOR, NO_REPLAY_AVAILABLE
 from baserow.ws.registries import PageType, page_registry
 
 
@@ -66,7 +67,7 @@ def test_page_types():
 async def test_core_consumer_connect_not_authenticated(data_fixture):
     communicator = WebsocketCommunicator(
         application,
-        f"ws/core/?jwt_token=",
+        "ws/core/?jwt_token=",
         headers=[(b"origin", b"http://localhost")],
     )
     connected, subprotocol = await communicator.connect()
@@ -75,7 +76,6 @@ async def test_core_consumer_connect_not_authenticated(data_fixture):
     response = await communicator.receive_json_from()
     assert response["type"] == "authentication"
     assert response["success"] is False
-    assert response["web_socket_id"] is None
     await communicator.disconnect()
 
 
@@ -86,7 +86,7 @@ async def test_core_consumer_connect_authenticated(data_fixture):
     user_1, token_1 = data_fixture.create_user_and_token()
     communicator = WebsocketCommunicator(
         application,
-        f"ws/core/?jwt_token={token_1}",
+        f"ws/core/?jwt_token={token_1}&web_socket_id=ws-1",
         headers=[(b"origin", b"http://localhost")],
     )
     connected, subprotocol = await communicator.connect()
@@ -95,7 +95,6 @@ async def test_core_consumer_connect_authenticated(data_fixture):
     response = await communicator.receive_json_from()
     assert response["type"] == "authentication"
     assert response["success"] is True
-    assert response["web_socket_id"] is not None
     await communicator.disconnect()
 
 
@@ -106,7 +105,7 @@ async def test_core_consumer_connect_authenticated_anonymous(data_fixture):
     user_1, token_1 = data_fixture.create_user_and_token()
     communicator = WebsocketCommunicator(
         application,
-        f"ws/core/?jwt_token={ANONYMOUS_USER_TOKEN}",
+        f"ws/core/?jwt_token={ANONYMOUS_USER_TOKEN}&web_socket_id=ws-anon",
         headers=[(b"origin", b"http://localhost")],
     )
     connected, subprotocol = await communicator.connect()
@@ -115,7 +114,6 @@ async def test_core_consumer_connect_authenticated_anonymous(data_fixture):
     response = await communicator.receive_json_from()
     assert response["type"] == "authentication"
     assert response["success"] is True
-    assert response["web_socket_id"] is not None
     await communicator.disconnect()
 
 
@@ -126,7 +124,7 @@ async def test_core_consumer_add_to_page_success(data_fixture, test_page_types):
     user_1, token_1 = data_fixture.create_user_and_token()
     communicator = WebsocketCommunicator(
         application,
-        f"ws/core/?jwt_token={token_1}",
+        f"ws/core/?jwt_token={token_1}&web_socket_id=ws-1",
         headers=[(b"origin", b"http://localhost")],
     )
     await communicator.connect()
@@ -157,7 +155,7 @@ async def test_core_consumer_add_page_doesnt_exist(data_fixture):
     # we do not expect the confirmation
     communicator = WebsocketCommunicator(
         application,
-        f"ws/core/?jwt_token={ANONYMOUS_USER_TOKEN}",
+        f"ws/core/?jwt_token={ANONYMOUS_USER_TOKEN}&web_socket_id=ws-anon",
         headers=[(b"origin", b"http://localhost")],
     )
     await communicator.connect()
@@ -175,7 +173,7 @@ async def test_core_consumer_add_to_page_failure(data_fixture, test_page_types):
     user_1, token_1 = data_fixture.create_user_and_token()
     communicator = WebsocketCommunicator(
         application,
-        f"ws/core/?jwt_token={token_1}",
+        f"ws/core/?jwt_token={token_1}&web_socket_id=ws-1",
         headers=[(b"origin", b"http://localhost")],
     )
     await communicator.connect()
@@ -198,7 +196,7 @@ async def test_core_consumer_remove_page_success(data_fixture, test_page_types):
     user_1, token_1 = data_fixture.create_user_and_token()
     communicator = WebsocketCommunicator(
         application,
-        f"ws/core/?jwt_token={token_1}",
+        f"ws/core/?jwt_token={token_1}&web_socket_id=ws-1",
         headers=[(b"origin", b"http://localhost")],
     )
     await communicator.connect()
@@ -234,7 +232,7 @@ async def test_core_consumer_remove_page_doesnt_exist(data_fixture):
     # we do not expect the confirmation
     communicator = WebsocketCommunicator(
         application,
-        f"ws/core/?jwt_token={ANONYMOUS_USER_TOKEN}",
+        f"ws/core/?jwt_token={ANONYMOUS_USER_TOKEN}&web_socket_id=ws-anon",
         headers=[(b"origin", b"http://localhost")],
     )
     await communicator.connect()
@@ -316,6 +314,27 @@ async def test_core_consumer_remove_all_page_scopes(data_fixture, test_page_type
 
 
 # SubscribedPages
+
+
+@pytest.mark.websockets
+@pytest.mark.parametrize(
+    "last_seen_id,expected",
+    [
+        # Missing or invalid input falls back to the safe baseline cursor.
+        ({}, FIRST_CONNECT_CURSOR),
+        ({"last_seen_id": None}, FIRST_CONNECT_CURSOR),
+        ({"last_seen_id": "abc"}, FIRST_CONNECT_CURSOR),
+        # Anything below NO_REPLAY_AVAILABLE is clamped to the baseline.
+        ({"last_seen_id": -3}, FIRST_CONNECT_CURSOR),
+        # The two sentinels and positive ids are passed through verbatim.
+        ({"last_seen_id": FIRST_CONNECT_CURSOR}, FIRST_CONNECT_CURSOR),
+        ({"last_seen_id": NO_REPLAY_AVAILABLE}, NO_REPLAY_AVAILABLE),
+        ({"last_seen_id": 42}, 42),
+        ({"last_seen_id": "42"}, 42),
+    ],
+)
+def test_parse_last_seen_id(last_seen_id, expected):
+    assert CoreConsumer._parse_last_seen_id(last_seen_id) == expected
 
 
 @pytest.mark.websockets

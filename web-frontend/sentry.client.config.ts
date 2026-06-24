@@ -25,7 +25,9 @@ if (dsn && dsn !== '') {
         blockAllMedia: true,
       }),
     ],
-    tracesSampleRate: 1.0,
+    // Sample rate for performance tracing, configurable via the
+    // SENTRY_TRACES_SAMPLE_RATE env var (shared with the backend).
+    tracesSampleRate: parseFloat(config.public.sentryTracesSampleRate) || 0,
     replaysSessionSampleRate: 0,
     replaysOnErrorSampleRate: 1.0,
     ...(isDev ? { transport: makeFakeTransport } : {}),

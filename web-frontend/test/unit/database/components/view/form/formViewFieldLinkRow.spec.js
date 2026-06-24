@@ -3,6 +3,8 @@ import flushPromises from 'flush-promises'
 
 import FormViewFieldLinkRow from '@baserow/modules/database/components/view/form/FormViewFieldLinkRow'
 import FormViewFieldMultipleLinkRow from '@baserow/modules/database/components/view/form/FormViewFieldMultipleLinkRow'
+import PaginatedDropdown from '@baserow/modules/core/components/PaginatedDropdown'
+import DropdownItem from '@baserow/modules/core/components/DropdownItem'
 import ViewService from '@baserow/modules/database/services/view'
 import { LinkRowFieldType } from '@baserow/modules/database/fieldTypes'
 
@@ -16,6 +18,15 @@ const mockLinkRowFieldLookup = (rows) => {
     .mockResolvedValue({ data: { results: rows, count: rows.length } })
   ViewService.mockReturnValue({ linkRowFieldLookup })
   return linkRowFieldLookup
+}
+
+const renderedOptionValues = async (wrapper) => {
+  const dropdown = wrapper.findComponent(PaginatedDropdown)
+  await dropdown.vm.fetch()
+  await flushPromises()
+  return dropdown
+    .findAllComponents(DropdownItem)
+    .map((item) => item.props('value'))
 }
 
 const linkRowField = {
@@ -175,6 +186,24 @@ describe('FormViewFieldLinkRow', () => {
   test('non-required + empty selection passes validation', async () => {
     const wrapper = await mountComponent({ value: [], required: false })
     expect(wrapper.vm.getValidationError(wrapper.vm.value)).toBeNull()
+  })
+
+  test('required field lists the real rows without the blank option', async () => {
+    mockLinkRowFieldLookup([{ id: 43, value: 'Real name' }])
+    const wrapper = await mountComponent({ value: [], required: true })
+    const values = await renderedOptionValues(wrapper)
+    expect(values).toContain(43)
+    expect(values).not.toContain(null)
+  })
+
+  test('non-required field keeps the blank option so a value can be reset', async () => {
+    mockLinkRowFieldLookup([{ id: 43, value: 'Real name' }])
+    const wrapper = await mountComponent({ value: [], required: false })
+    const values = await renderedOptionValues(wrapper)
+    expect(values).toContain(43)
+    // Without a clear button, the blank entry is the only way to unset an
+    // optional field, so it must remain available.
+    expect(values).toContain(null)
   })
 })
 
@@ -340,5 +369,18 @@ describe('FormViewFieldMultipleLinkRow', () => {
   test('non-required + empty array passes validation', async () => {
     const wrapper = await mountComponent({ value: [], required: false })
     expect(wrapper.vm.getValidationError(wrapper.vm.value)).toBeNull()
+  })
+
+  test('a slot dropdown lists the real rows without the blank option', async () => {
+    mockLinkRowFieldLookup([{ id: 43, value: 'Real name' }])
+    const wrapper = await mountComponent({
+      value: [{ id: false, value: '' }],
+      required: false,
+    })
+    const values = await renderedOptionValues(wrapper)
+    expect(values).toContain(43)
+    // no blank entry appears, even on an optional field: a slot is
+    // cleared with the bin button, not by picking an empty option.
+    expect(values).not.toContain(null)
   })
 })

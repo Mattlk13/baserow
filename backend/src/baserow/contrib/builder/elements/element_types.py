@@ -18,8 +18,8 @@ from typing import (
 
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.db.models import IntegerField, Q, QuerySet
-from django.db.models.functions import Cast
+from django.db.models import Q, QuerySet
+from django.utils.translation import gettext_lazy as _
 
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -31,7 +31,6 @@ from baserow.contrib.builder.api.elements.serializers import (
 )
 from baserow.contrib.builder.data_sources.handler import DataSourceHandler
 from baserow.contrib.builder.elements.exceptions import ElementImproperlyConfigured
-from baserow.contrib.builder.elements.handler import ElementHandler
 from baserow.contrib.builder.elements.mixins import (
     CollectionElementTypeMixin,
     CollectionElementWithFieldsTypeMixin,
@@ -135,6 +134,7 @@ class ColumnElementType(ContainerElementTypeMixin, ElementType):
     in a column.
     """
 
+    display_name = _("Column")
     type = "column"
     model_class = ColumnElement
 
@@ -188,14 +188,12 @@ class ColumnElementType(ContainerElementTypeMixin, ElementType):
 
         return [str(place) for place in places_removed]
 
-    def apply_order_by_children(self, queryset: QuerySet[Element]) -> QuerySet[Element]:
-        return queryset.annotate(
-            place_in_container_as_int=Cast(
-                "place_in_container", output_field=IntegerField()
-            )
-        ).order_by("place_in_container_as_int", "order")
+    def get_places(self, instance: ColumnElement) -> Dict[str, Dict[str, str]]:
+        return {
+            str(place): {"label": str(place)} for place in range(instance.column_amount)
+        }
 
-    def validate_place_in_container(
+    def validate_position_as_child(
         self, place_in_container: str, instance: ColumnElement
     ):
         max_place_in_container = instance.column_amount - 1
@@ -219,6 +217,7 @@ class ColumnElementType(ContainerElementTypeMixin, ElementType):
 
 
 class FormContainerElementType(ContainerElementTypeMixin, ElementType):
+    display_name = _("Form")
     type = "form_container"
     model_class = FormContainerElement
     allowed_fields = [
@@ -290,6 +289,7 @@ class FormContainerElementType(ContainerElementTypeMixin, ElementType):
 
 
 class SimpleContainerElementType(ContainerElementTypeMixin, ElementType):
+    display_name = _("Container")
     type = "simple_container"
     model_class = SimpleContainerElement
 
@@ -301,6 +301,7 @@ class SimpleContainerElementType(ContainerElementTypeMixin, ElementType):
 
 
 class TableElementType(CollectionElementWithFieldsTypeMixin, ElementType):
+    display_name = _("Table")
     type = "table"
     model_class = TableElement
 
@@ -365,6 +366,7 @@ class TableElementType(CollectionElementWithFieldsTypeMixin, ElementType):
 class RepeatElementType(
     CollectionElementTypeMixin, ContainerElementTypeMixin, ElementType
 ):
+    display_name = _("Repeat")
     type = "repeat"
     model_class = RepeatElement
 
@@ -432,6 +434,7 @@ class RepeatElementType(
 class RecordSelectorElementType(
     FormElementTypeMixin, CollectionElementTypeMixin, ElementType
 ):
+    display_name = _("Record selector")
     type = "record_selector"
     model_class = RecordSelectorElement
     simple_formula_fields = CollectionElementTypeMixin.simple_formula_fields + [
@@ -579,16 +582,15 @@ class RecordSelectorElementType(
         import_formula: Callable[[str, Dict[str, Any]], str],
         **kwargs: Dict[str, Any],
     ) -> Set[Instance]:
-        # We need to import the option_name_suffix formula separately because
-        # it uses a different import_context
+        # Import the option_name_suffix formula. The import context
+        # (data_source_id etc.) is already passed via **kwargs by the caller.
         updated_models = super().import_formulas(
             instance, id_mapping, import_formula, **kwargs
         )
-        formula_context = ElementHandler().get_import_context_addition(instance.id)
         instance.option_name_suffix = import_formula(
             instance.option_name_suffix,
             id_mapping,
-            **(kwargs | formula_context),
+            **kwargs,
         )
         updated_models.add(instance)
         return updated_models
@@ -681,6 +683,7 @@ class HeadingElementType(ElementType):
     A simple heading element that can be used to display a title.
     """
 
+    display_name = _("Heading")
     type = "heading"
     model_class = HeadingElement
     serializer_field_names = ["value", "level"]
@@ -690,6 +693,16 @@ class HeadingElementType(ElementType):
     class SerializedDict(ElementDict):
         value: BaserowFormulaObject
         level: int
+
+    def get_graph_point_label(self, instance: HeadingElement) -> str:
+        value = instance.value
+        if isinstance(value, dict):
+            formula = value.get("formula", "")
+            if len(formula) >= 2 and formula[0] == "'" and formula[-1] == "'":
+                label = formula[1:-1]
+                if label:
+                    return label
+        return self.type
 
     @property
     def serializer_field_overrides(self):
@@ -737,6 +750,7 @@ class TextElementType(ElementType):
     A text element that allows plain or markdown content.
     """
 
+    display_name = _("Text")
     type = "text"
     model_class = TextElement
     serializer_field_names = ["value", "format"]
@@ -907,16 +921,6 @@ class NavigationElementManager:
             "target": "blank",
         }
 
-    def validate_place(
-        self,
-        page: Page,
-        parent_element: Optional[Element],
-        place_in_container: str,
-    ):
-        """
-        We need it because it's called in the prepare_value_for_db.
-        """
-
     def prepare_value_for_db(
         self, values: Dict, instance: Optional[LinkElement] = None
     ):
@@ -968,6 +972,7 @@ class LinkElementType(ElementType):
     A link element that can be used to navigate to a page or a URL.
     """
 
+    display_name = _("Link")
     type = "link"
     model_class = LinkElement
     simple_formula_fields = NavigationElementManager.simple_formula_fields + ["value"]
@@ -1105,6 +1110,7 @@ class ImageElementType(ElementType):
     or via an uploaded file
     """
 
+    display_name = _("Image")
     type = "image"
     model_class = ImageElement
     serializer_field_names = [
@@ -1268,6 +1274,7 @@ class InputElementType(FormElementTypeMixin, ElementType, abc.ABC):
 
 
 class RatingElementType(ElementType):
+    display_name = _("Rating")
     type = "rating"
     model_class = RatingElement
     allowed_fields = [
@@ -1314,6 +1321,7 @@ class RatingElementType(ElementType):
 
 
 class RatingInputElementType(InputElementType):
+    display_name = _("Rating input")
     type = "rating_input"
     model_class = RatingInputElement
     allowed_fields = [
@@ -1399,6 +1407,7 @@ class RatingInputElementType(InputElementType):
 
 
 class InputTextElementType(InputElementType):
+    display_name = _("Input text")
     type = "input_text"
     model_class = InputTextElement
     allowed_fields = [
@@ -1538,6 +1547,7 @@ class InputTextElementType(InputElementType):
 
 
 class ButtonElementType(ElementType):
+    display_name = _("Button")
     type = "button"
     model_class = ButtonElement
     allowed_fields = ["value"]
@@ -1582,6 +1592,7 @@ class ButtonElementType(ElementType):
 
 
 class CheckboxElementType(InputElementType):
+    display_name = _("Checkbox")
     type = "checkbox"
     model_class = CheckboxElement
     allowed_fields = ["label", "default_value", "required"]
@@ -1655,6 +1666,7 @@ class CheckboxElementType(InputElementType):
 
 
 class ChoiceElementType(FormElementTypeMixin, ElementType):
+    display_name = _("Choice")
     type = "choice"
     model_class = ChoiceElement
     allowed_fields = [
@@ -1967,6 +1979,7 @@ class ChoiceElementType(FormElementTypeMixin, ElementType):
 
 
 class IFrameElementType(ElementType):
+    display_name = _("Iframe")
     type = "iframe"
     model_class = IFrameElement
     allowed_fields = ["source_type", "url", "embed", "height"]
@@ -2025,6 +2038,7 @@ class IFrameElementType(ElementType):
 
 
 class DateTimePickerElementType(FormElementTypeMixin, ElementType):
+    display_name = _("Date time picker")
     type = "datetime_picker"
     model_class = DateTimePickerElement
     allowed_fields = [
@@ -2168,6 +2182,7 @@ class HeaderElementType(MultiPageContainerElementType):
     A container element that can be displayed on multiple pages.
     """
 
+    display_name = _("Shared header")
     type = "header"
     model_class = HeaderElement
 
@@ -2177,6 +2192,7 @@ class FooterElementType(MultiPageContainerElementType):
     A container element that can be displayed on multiple pages.
     """
 
+    display_name = _("Shared footer")
     type = "footer"
     model_class = FooterElement
 
@@ -2186,6 +2202,7 @@ class MenuElementType(ElementType):
     A Menu element that provides navigation capabilities to the application.
     """
 
+    display_name = _("Menu")
     type = "menu"
     model_class = MenuElement
     serializer_field_names = ["orientation", "alignment", "menu_items", "variant"]

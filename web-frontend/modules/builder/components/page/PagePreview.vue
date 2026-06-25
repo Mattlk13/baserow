@@ -49,6 +49,7 @@
             <AddElementZone
               class="add-element-zone--full-height"
               :page="currentPage"
+              :target-page-place="PAGE_PLACES.CONTENT"
               :label="$t('pagePreview.emptyMessage')"
               @add-element="$refs.addElementModal.show()"
             />
@@ -176,6 +177,7 @@ export default {
   },
   computed: {
     DIRECTIONS: () => DIRECTIONS,
+    PAGE_PLACES: () => PAGE_PLACES,
     ...mapGetters({
       deviceTypeSelected: 'page/getDeviceTypeSelected',
       getElementSelected: 'element/getSelected',
@@ -253,6 +255,12 @@ export default {
         }
       )[0]
 
+      // Can be undefined if elementSelectedPage isn't in the store yet
+      // (timing gap between element selection and page load).
+      if (!ancestorWithPagePlace) {
+        return null
+      }
+
       return this.$registry
         .get('element', ancestorWithPagePlace.type)
         .getPagePlace()
@@ -289,12 +297,9 @@ export default {
         : 'unset'
     },
     parentOfElementSelected() {
-      if (!this.elementSelected?.parent_element_id) {
-        return null
-      }
-      return this.$store.getters['element/getElementById'](
+      return this.$store.getters['element/getParent'](
         this.elementSelectedPage,
-        this.elementSelected.parent_element_id
+        this.elementSelected
       )
     },
     canCreateElement() {

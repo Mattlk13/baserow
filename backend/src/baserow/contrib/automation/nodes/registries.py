@@ -1,6 +1,7 @@
 from typing import Any, Dict, Optional
 
 from django.contrib.auth.models import AbstractUser
+from django.utils.translation import gettext_lazy as _
 
 from rest_framework.exceptions import PermissionDenied
 
@@ -12,8 +13,9 @@ from baserow.contrib.automation.nodes.exceptions import (
     AutomationNodeNotReplaceable,
 )
 from baserow.contrib.automation.nodes.models import AutomationNode
-from baserow.contrib.automation.nodes.types import AutomationNodeDict, NodePositionType
+from baserow.contrib.automation.nodes.types import AutomationNodeDict
 from baserow.contrib.automation.workflows.models import AutomationWorkflow
+from baserow.core.graph.types import GraphPointPositionType
 from baserow.core.integrations.models import Integration
 from baserow.core.models import Workspace
 from baserow.core.registry import (
@@ -42,6 +44,8 @@ class AutomationNodeType(
     ModelInstanceMixin,
     Instance,
 ):
+    display_name = _("Unnamed node")
+
     service_type = None
     parent_property_name = "workflow"
     id_mapping_name = "automation_workflow_nodes"
@@ -103,7 +107,7 @@ class AutomationNodeType(
         self,
         node: AutomationNode,
         reference_node: AutomationNode | None,
-        position: NodePositionType,
+        position: GraphPointPositionType,
         output: str,
     ):
         """Called before the node is moved."""
@@ -112,7 +116,7 @@ class AutomationNodeType(
         self,
         workflow: AutomationWorkflow,
         reference_node: AutomationNode | None,
-        position: NodePositionType,
+        position: GraphPointPositionType,
         output: str,
     ):
         """

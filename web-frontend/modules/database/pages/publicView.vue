@@ -117,7 +117,7 @@ const { data, error } = await useAsyncData(
         )
       )
 
-      return { success: true, database, table }
+      return { success: true, database, table, fields, view }
     } catch (e) {
       const statusCode = e.response?.status
       // password protected view requires authentication

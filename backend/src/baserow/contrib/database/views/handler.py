@@ -12,7 +12,7 @@ from django.contrib.auth.models import AbstractUser, AnonymousUser
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.core.exceptions import FieldDoesNotExist, ValidationError
-from django.db import OperationalError, connection
+from django.db import OperationalError, connection, transaction
 from django.db import models as django_models
 from django.db.models import Count, Q, prefetch_related_objects
 from django.db.models.expressions import OrderBy
@@ -2203,6 +2203,22 @@ class ViewHandler(metaclass=baserow_trace_methods(tracer)):
 
         return view_sort
 
+    def _append_to_priority_chain(self, model, view, **create_kwargs):
+        """
+        Creates a `ViewSort`/`ViewGroupBy` for the view, appended last, and renumbers
+        the `priority` chain to a dense `1..N` sequence via `order_objects`. Keeping
+        priorities dense and bounded by the entry count prevents them from reaching the
+        smallint ceiling (the historical `smallint out of range` error). The new entry
+        defaults to the highest `priority`, so it sorts last before renumbering.
+        """
+
+        with transaction.atomic():
+            instance = model.objects.create(view=view, **create_kwargs)
+            queryset = model.objects.select_for_update(of=("self",)).filter(view=view)
+            model.order_objects(queryset, [instance.id], field="priority")
+            instance.refresh_from_db(fields=["priority"])
+            return instance
+
     def create_sort(
         self,
         user: AbstractUser,
@@ -2268,20 +2284,13 @@ class ViewHandler(metaclass=baserow_trace_methods(tracer)):
                 f"A sort with the field {field.pk} already exists."
             )
 
-        priority = (
-            ViewSort.get_highest_order_of_queryset(
-                ViewSort.objects.filter(view=view), field="priority"
-            )
-            + 1
-        )
-
-        view_sort = ViewSort.objects.create(
+        view_sort = self._append_to_priority_chain(
+            ViewSort,
+            view,
             pk=primary_key,
-            view=view,
             field=field,
             order=order,
             type=sort_type,
-            priority=priority,
         )
 
         view_sort_created.send(self, view_sort=view_sort, user=user)
@@ -2568,21 +2577,14 @@ class ViewHandler(metaclass=baserow_trace_methods(tracer)):
                 f"A group by for the field {field.pk} already exists."
             )
 
-        priority = (
-            ViewGroupBy.get_highest_order_of_queryset(
-                ViewGroupBy.objects.filter(view=view), field="priority"
-            )
-            + 1
-        )
-
-        view_group_by = ViewGroupBy.objects.create(
+        view_group_by = self._append_to_priority_chain(
+            ViewGroupBy,
+            view,
             pk=primary_key,
-            view=view,
             field=field,
             order=order,
             width=width,
             type=sort_type,
-            priority=priority,
         )
 
         view_group_by_created.send(self, view_group_by=view_group_by, user=user)

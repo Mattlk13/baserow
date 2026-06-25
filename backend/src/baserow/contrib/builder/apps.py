@@ -314,6 +314,8 @@ class BuilderConfig(AppConfig):
             CoreSMTPEmailActionType,
             CreateRowWorkflowActionType,
             DeleteRowWorkflowActionType,
+            LocalBaserowCreateRowsWorkflowActionType,
+            LocalBaserowUpdateRowsWorkflowActionType,
             LogoutWorkflowActionType,
             NotificationWorkflowActionType,
             OpenPageWorkflowActionType,
@@ -325,7 +327,13 @@ class BuilderConfig(AppConfig):
         builder_workflow_action_type_registry.register(NotificationWorkflowActionType())
         builder_workflow_action_type_registry.register(OpenPageWorkflowActionType())
         builder_workflow_action_type_registry.register(CreateRowWorkflowActionType())
+        builder_workflow_action_type_registry.register(
+            LocalBaserowCreateRowsWorkflowActionType()
+        )
         builder_workflow_action_type_registry.register(UpdateRowWorkflowActionType())
+        builder_workflow_action_type_registry.register(
+            LocalBaserowUpdateRowsWorkflowActionType()
+        )
         builder_workflow_action_type_registry.register(DeleteRowWorkflowActionType())
         builder_workflow_action_type_registry.register(LogoutWorkflowActionType())
         builder_workflow_action_type_registry.register(

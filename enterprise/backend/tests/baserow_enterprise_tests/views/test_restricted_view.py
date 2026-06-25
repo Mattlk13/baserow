@@ -21,6 +21,7 @@ from baserow.contrib.database.rows.actions import (
     CreateRowsActionType,
     DeleteRowActionType,
     DeleteRowsActionType,
+    MoveRowActionType,
     UpdateRowActionType,
     UpdateRowsActionType,
 )
@@ -45,6 +46,7 @@ from baserow.core.action.handler import ActionHandler
 from baserow.core.action.registries import action_type_registry
 from baserow.core.exceptions import PermissionDenied as BaserowPermissionDenied
 from baserow.core.utils import get_value_at_path
+from baserow.test_utils.helpers import assert_undo_redo_actions_are_valid
 from baserow_enterprise.role.handler import RoleAssignmentHandler
 from baserow_enterprise.role.models import Role
 from baserow_enterprise.view_ownership_types import RestrictedViewOwnershipType
@@ -750,6 +752,171 @@ def test_editor_cannot_update_row_with_hidden_field_values(
         view=view,
     )
     assert getattr(updated_row, f"field_{visible_field.id}") == "updated"
+
+
+@pytest.mark.django_db
+@override_settings(DEBUG=True)
+def test_editor_can_move_row_in_restricted_view(enterprise_data_fixture):
+    enterprise_data_fixture.enable_enterprise()
+
+    user = enterprise_data_fixture.create_user()
+    user2 = enterprise_data_fixture.create_user()
+    workspace = enterprise_data_fixture.create_workspace(user=user, members=[user2])
+    database = enterprise_data_fixture.create_database_application(workspace=workspace)
+    table = enterprise_data_fixture.create_database_table(database=database)
+    enterprise_data_fixture.create_text_field(table=table, primary=True)
+
+    view = enterprise_data_fixture.create_grid_view(
+        table=table, ownership_type=RestrictedViewOwnershipType.type
+    )
+
+    row_1 = RowHandler().create_row(user, table)
+    row_2 = RowHandler().create_row(user, table)
+
+    editor_role = Role.objects.get(uid="EDITOR")
+    no_access_role = Role.objects.get(uid="NO_ACCESS")
+    RoleAssignmentHandler().assign_role(
+        user2, workspace, role=no_access_role, scope=workspace
+    )
+    RoleAssignmentHandler().assign_role(
+        user2,
+        workspace,
+        role=editor_role,
+        scope=View.objects.get(id=view.id),
+    )
+
+    # Without the view the editor only has the role on the view scope, so the
+    # table-level move permission is denied.
+    with pytest.raises(BaserowPermissionDenied):
+        RowHandler().move_row_by_id(user2, table, row_2.id, before_row=row_1)
+
+    # With the view the editor is allowed to move the row, just like updating it.
+    moved_row = RowHandler().move_row_by_id(
+        user2, table, row_2.id, before_row=row_1, view=view
+    )
+    assert moved_row.order < row_1.order
+
+
+@pytest.mark.django_db
+@override_settings(DEBUG=True)
+def test_editor_can_move_row_in_restricted_view_via_api(
+    enterprise_data_fixture, api_client
+):
+    enterprise_data_fixture.enable_enterprise()
+
+    user = enterprise_data_fixture.create_user()
+    user2, token2 = enterprise_data_fixture.create_user_and_token()
+    workspace = enterprise_data_fixture.create_workspace(user=user, members=[user2])
+    database = enterprise_data_fixture.create_database_application(workspace=workspace)
+    table = enterprise_data_fixture.create_database_table(database=database)
+    enterprise_data_fixture.create_text_field(table=table, primary=True)
+
+    view = enterprise_data_fixture.create_grid_view(
+        table=table, ownership_type=RestrictedViewOwnershipType.type
+    )
+
+    row_1 = RowHandler().create_row(user, table)
+    row_2 = RowHandler().create_row(user, table)
+
+    editor_role = Role.objects.get(uid="EDITOR")
+    no_access_role = Role.objects.get(uid="NO_ACCESS")
+    RoleAssignmentHandler().assign_role(
+        user2, workspace, role=no_access_role, scope=workspace
+    )
+    RoleAssignmentHandler().assign_role(
+        user2,
+        workspace,
+        role=editor_role,
+        scope=View.objects.get(id=view.id),
+    )
+
+    move_url = reverse(
+        "api:database:rows:move",
+        kwargs={"table_id": table.id, "row_id": row_2.id},
+    )
+
+    # Without the view query param the editor only has the role on the view scope,
+    # so the table-level move permission is denied.
+    response = api_client.patch(
+        f"{move_url}?before_id={row_1.id}",
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token2}",
+    )
+    assert response.status_code == HTTP_401_UNAUTHORIZED
+
+    # Providing the view allows the editor to move the row.
+    response = api_client.patch(
+        f"{move_url}?before_id={row_1.id}&view={view.id}",
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token2}",
+    )
+    assert response.status_code == HTTP_200_OK
+
+    row_2.refresh_from_db()
+    row_1.refresh_from_db()
+    assert row_2.order < row_1.order
+
+
+@pytest.mark.django_db
+@pytest.mark.undo_redo
+@override_settings(DEBUG=True)
+def test_editor_can_undo_redo_move_row_in_restricted_view(enterprise_data_fixture):
+    enterprise_data_fixture.enable_enterprise()
+
+    session_id = "session-id"
+    user = enterprise_data_fixture.create_user()
+    user2 = enterprise_data_fixture.create_user(session_id=session_id)
+    workspace = enterprise_data_fixture.create_workspace(user=user, members=[user2])
+    database = enterprise_data_fixture.create_database_application(workspace=workspace)
+    table = enterprise_data_fixture.create_database_table(database=database)
+    enterprise_data_fixture.create_text_field(table=table, primary=True)
+
+    view = enterprise_data_fixture.create_grid_view(
+        table=table, ownership_type=RestrictedViewOwnershipType.type
+    )
+
+    row_1 = RowHandler().create_row(user, table)
+    row_2 = RowHandler().create_row(user, table)
+
+    editor_role = Role.objects.get(uid="EDITOR")
+    no_access_role = Role.objects.get(uid="NO_ACCESS")
+    RoleAssignmentHandler().assign_role(
+        user2, workspace, role=no_access_role, scope=workspace
+    )
+    RoleAssignmentHandler().assign_role(
+        user2,
+        workspace,
+        role=editor_role,
+        scope=View.objects.get(id=view.id),
+    )
+
+    assert row_1.order < row_2.order
+
+    action_type_registry.get_by_type(MoveRowActionType).do(
+        user2, table, row_2.id, before_row=row_1, view=view
+    )
+
+    row_1.refresh_from_db()
+    row_2.refresh_from_db()
+    assert row_2.order < row_1.order
+
+    actions_undone = ActionHandler.undo(
+        user2, [TableActionScopeType.value(table_id=table.id)], session_id
+    )
+    assert_undo_redo_actions_are_valid(actions_undone, [MoveRowActionType])
+
+    row_1.refresh_from_db()
+    row_2.refresh_from_db()
+    assert row_1.order < row_2.order
+
+    actions_redone = ActionHandler.redo(
+        user2, [TableActionScopeType.value(table_id=table.id)], session_id
+    )
+    assert_undo_redo_actions_are_valid(actions_redone, [MoveRowActionType])
+
+    row_1.refresh_from_db()
+    row_2.refresh_from_db()
+    assert row_2.order < row_1.order
 
 
 @pytest.mark.django_db

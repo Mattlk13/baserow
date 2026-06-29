@@ -1104,7 +1104,9 @@ def escape_csv_cell(payload):
     payload = str(payload)
     if (
         payload
-        and payload[0] in ("@", "+", "-", "=", "|", "%")
+        # A leading tab, carriage return or newline can also start a formula in
+        # some spreadsheet parsers, so neutralize those too.
+        and payload[0] in ("@", "+", "-", "=", "|", "%", "\t", "\r", "\n")
         and not re.match("^-?[0-9,\\.]+$", payload)
     ):
         payload = payload.replace("|", "\\|")

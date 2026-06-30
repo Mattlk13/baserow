@@ -7,6 +7,7 @@ import {
   CoreCSVFileReaderServiceType,
   CoreHTTPRequestServiceType,
   CoreSMTPEmailServiceType,
+  CoreStartWorkflowServiceType,
 } from '@baserow/modules/integrations/core/serviceTypes'
 import {
   LocalBaserowCreateRowWorkflowServiceType,
@@ -369,7 +370,7 @@ export class CoreHTTPRequestWorkflowActionType extends WorkflowActionServiceType
   }
 
   getOrder() {
-    return 60
+    return 47
   }
 }
 
@@ -383,7 +384,7 @@ export class CoreSMTPEmailWorkflowActionType extends WorkflowActionServiceType {
   }
 
   getOrder() {
-    return 50
+    return 48
   }
 }
 
@@ -401,6 +402,23 @@ export class CoreCSVFileReaderWorkflowActionType extends WorkflowActionServiceTy
 
   getOrder() {
     return 75
+  }
+}
+
+export class CoreStartWorkflowWorkflowActionType extends WorkflowActionServiceType {
+  static getType() {
+    return 'start_workflow'
+  }
+
+  get serviceType() {
+    return this.app.$registry.get(
+      'service',
+      CoreStartWorkflowServiceType.getType()
+    )
+  }
+
+  getOrder() {
+    return 46
   }
 }
 
@@ -517,7 +535,7 @@ export class SlackWriteMessageWorkflowActionType extends WorkflowActionServiceTy
   }
 
   getOrder() {
-    return 55
+    return 90
   }
 
   get serviceType() {

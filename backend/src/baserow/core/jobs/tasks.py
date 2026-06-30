@@ -13,6 +13,7 @@ from baserow.core.telemetry.utils import setup_user_in_baggage_and_spans
     bind=True,
     queue="export",
     soft_time_limit=settings.BASEROW_JOB_SOFT_TIME_LIMIT,
+    time_limit=settings.BASEROW_JOB_SOFT_TIME_LIMIT + 30,
 )
 def run_async_job(self, job_id: int):
     """Run the job task asynchronously"""

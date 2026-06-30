@@ -21,7 +21,11 @@ def _get_singleton_autoreschedule_flag(table_id: int) -> SingletonAutoReschedule
     return SingletonAutoRescheduleFlag(f"database_search_data_lock_{table_id}")
 
 
-@app.task(queue="export")
+@app.task(
+    queue="export",
+    soft_time_limit=max(1, settings.CELERY_SEARCH_UPDATE_HARD_TIME_LIMIT - 30),
+    time_limit=settings.CELERY_SEARCH_UPDATE_HARD_TIME_LIMIT,
+)
 def schedule_update_search_data(
     table_id: int,
     field_ids: Optional[List[int]] = None,

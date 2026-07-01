@@ -8,6 +8,12 @@ from loguru import logger
 from opentelemetry import metrics
 
 from baserow.config.settings.utils import try_int
+from baserow.core.feature_flags import FF_USER_PRESENCE, feature_flag_is_enabled
+from baserow.ws.presence import (
+    NullPresenceHandler,
+    PresenceHandler,
+    PresenceHandlerProtocol,
+)
 from baserow.ws.realtime_events import (
     FIRST_CONNECT_CURSOR,
     NO_REPLAY_AVAILABLE,
@@ -166,6 +172,8 @@ class SubscribedPages:
 
 
 class CoreConsumer(AsyncJsonWebsocketConsumer):
+    presence: PresenceHandlerProtocol = NullPresenceHandler()
+
     async def connect(self):
         await self.accept()
         websocket_connections_counter.add(1)
@@ -188,6 +196,15 @@ class CoreConsumer(AsyncJsonWebsocketConsumer):
             return
 
         self.scope["pages"] = SubscribedPages()
+        web_socket_id = self.scope["web_socket_id"]
+        if feature_flag_is_enabled(FF_USER_PRESENCE):
+            self.presence = PresenceHandler(
+                consumer=self,
+                web_socket_id=web_socket_id,
+                user_id=user.id,
+            )
+        else:
+            self.presence = NullPresenceHandler()
         await self.channel_layer.group_add("users", self.channel_name)
 
     async def disconnect(self, code):
@@ -196,7 +213,8 @@ class CoreConsumer(AsyncJsonWebsocketConsumer):
         # eager connect counter would drift ahead during infrastructure failures,
         # exactly when the metric matters most.
         try:
-            await self._remove_all_page_scopes(send_confirmation=False)
+            await self.presence.leave_all_spaces()
+            await self._discard_all_channel_groups()
             await self.channel_layer.group_discard("users", self.channel_name)
         finally:
             websocket_disconnects_counter.add(
@@ -295,8 +313,14 @@ class CoreConsumer(AsyncJsonWebsocketConsumer):
         self.scope["pages"].add(page_scope)
 
         await self.send_json(
-            {"type": "page_add", "page": page_type.type, "parameters": parameters}
+            {
+                "type": "page_add",
+                "page": page_type.type,
+                "parameters": parameters,
+            }
         )
+
+        await self.presence.handle_page_subscribed(page_type.type, parameters)
 
     async def _remove_page_scope(self, content: dict, send_confirmation=True):
         """
@@ -315,16 +339,17 @@ class CoreConsumer(AsyncJsonWebsocketConsumer):
         if not context:
             return
 
-        user, page_type, parameters = attrgetter(
-            "user", "resolved_page_type", "page_scope.page_parameters"
+        page_type, parameters = attrgetter(
+            "resolved_page_type", "page_scope.page_parameters"
         )(context)
 
         group_name = page_type.get_group_name(**parameters)
         await self.channel_layer.group_discard(group_name, self.channel_name)
 
         page_scope = PageScope(page_type=page_type.type, page_parameters=parameters)
-
         self.scope["pages"].remove(page_scope)
+
+        await self.presence.handle_page_unsubscribed(page_type.type, parameters)
 
         permission_group_name = page_type.get_permission_channel_group_name(
             **parameters
@@ -348,18 +373,53 @@ class CoreConsumer(AsyncJsonWebsocketConsumer):
     async def _remove_all_page_scopes(self, send_confirmation=True):
         """
         Unsubscribes the connection from all currently subscribed pages.
+        Used for live connections (e.g. permission revocation that affects
+        all pages). For disconnect cleanup, use _discard_all_channel_groups.
         """
 
         if self.scope.get("pages"):
             for page_scope in self.scope["pages"].copy():
-                content = {
-                    "user": self.scope["user"],
-                    "web_socket_id": self.scope["web_socket_id"],
-                    "remove_page": page_scope.page_type,
-                    **page_scope.page_parameters,
-                }
-                await self._remove_page_scope(
-                    content, send_confirmation=send_confirmation
+                try:
+                    content = {
+                        "user": self.scope["user"],
+                        "web_socket_id": self.scope["web_socket_id"],
+                        "remove_page": page_scope.page_type,
+                        **page_scope.page_parameters,
+                    }
+                    await self._remove_page_scope(
+                        content, send_confirmation=send_confirmation
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to remove page scope {} during cleanup",
+                        page_scope.page_type,
+                    )
+
+    async def _discard_all_channel_groups(self) -> None:
+        """
+        Tears down all channel group memberships without sending client
+        messages or touching presence. Used during disconnect — presence
+        cleanup is handled separately by leave_all_spaces().
+        """
+
+        if not self.scope.get("pages"):
+            return
+
+        for page_scope in self.scope["pages"].copy():
+            try:
+                page_type = page_registry.get(page_scope.page_type)
+                group_name = page_type.get_group_name(**page_scope.page_parameters)
+                await self.channel_layer.group_discard(group_name, self.channel_name)
+                perm = page_type.get_permission_channel_group_name(
+                    **page_scope.page_parameters
+                )
+                if perm:
+                    await self.channel_layer.group_discard(perm, self.channel_name)
+            except Exception:
+                logger.exception(
+                    "Failed to discard channel groups for page scope {} "
+                    "during disconnect",
+                    page_scope.page_type,
                 )
 
     async def _remove_page_scopes_associated_with_perm_group(

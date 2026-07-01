@@ -162,6 +162,7 @@ export class RealTimeHandler {
     this.socket.onclose = () => {
       this.connected = false
       this.subscribedToPages = this.pages.length === 0
+      this.context.store.dispatch('presence/clearAllSpaces')
       this.delayedReconnect()
     }
   }
@@ -571,6 +572,32 @@ export class RealTimeHandler {
 
     this.registerEvent('all_notifications_cleared', ({ store }) => {
       store.dispatch('notification/forceClearAll')
+    })
+
+    this.registerEvent('presence.members', ({ store }, data) => {
+      store.dispatch('presence/handleMembers', {
+        space: data.space,
+        entries: data.entries,
+      })
+    })
+
+    this.registerEvent('presence.space_discard', ({ store }, data) => {
+      store.dispatch('presence/clearSpace', { space: data.space })
+    })
+
+    this.registerEvent('presence.join', ({ store }, data) => {
+      store.dispatch('presence/handleJoin', {
+        space: data.space,
+        presence_id: data.presence_id,
+        user_id: data.user_id,
+      })
+    })
+
+    this.registerEvent('presence.leave', ({ store }, data) => {
+      store.dispatch('presence/handleLeave', {
+        space: data.space,
+        presence_id: data.presence_id,
+      })
     })
 
     this.registerEvent('force_disconnect', ({ store }) => {

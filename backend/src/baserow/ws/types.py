@@ -1,4 +1,4 @@
-from typing import Any, NamedTuple, TypedDict
+from typing import Any, NamedTuple, TypedDict, Union
 
 
 class ChannelGroupMessage(NamedTuple):
@@ -40,3 +40,28 @@ class BroadcastToUsersIndividualPayloadsMessage(TypedDict, total=False):
     type: str
     payload_map: PayloadMap
     ignore_web_socket_id: str | None
+
+
+RealtimeEventPayload = Union[
+    BroadcastToUsersMessage,
+    BroadcastToChannelGroupMessage,
+    BroadcastToUsersIndividualPayloadsMessage,
+]
+
+
+class RedisPresenceEntry(TypedDict):
+    user_id: int
+
+
+class ActivePresenceEntry(TypedDict):
+    user_id: int
+    presence_id: str
+
+
+class PresenceMembershipMessage(TypedDict):
+    """A presence join or leave event broadcast to a space's channel group."""
+
+    type: str
+    space: str
+    user_id: int
+    presence_id: str

@@ -162,6 +162,7 @@ import {
   genericContainsFilter,
   genericContainsWordFilter,
   genericHasValueEqualFilter,
+  genericStartsWithFilter,
 } from '@baserow/modules/database/utils/fieldFilters'
 import GridViewFieldFormula from '@baserow/modules/database/components/view/grid/fields/GridViewFieldFormula'
 import FieldFormulaSubForm from '@baserow/modules/database/components/field/FieldFormulaSubForm'
@@ -767,6 +768,13 @@ export class FieldType extends Registerable {
   }
 
   /**
+   * Should return a starts with filter function unique for this field type.
+   */
+  getStartsWithFilterFunction(field) {
+    return (rowValue, humanReadableRowValue, filterValue) => false
+  }
+
+  /**
    * Converts rowValue to its human readable form first before applying the
    * filter returned from getContainsFilterFunction.
    */
@@ -806,6 +814,25 @@ export class FieldType extends Registerable {
       this.getContainsWordFilterFunction(field)(
         rowValue,
         this.toHumanReadableString(field, rowValue),
+        filterValue
+      )
+    )
+  }
+
+  /**
+   * Converts rowValue to its searchable form first before applying the filter
+   * returned from getStartsWithFilterFunction. We use `toSearchableString` rather
+   * than `toHumanReadableString` so the real-time match stays consistent with the
+   * backend, which filters on the raw value and knows nothing about display
+   * formatting (e.g. a number's prefix or thousands separator would otherwise
+   * break the start-anchored match).
+   */
+  startsWithFilter(rowValue, filterValue, field) {
+    return (
+      filterValue === '' ||
+      this.getStartsWithFilterFunction(field)(
+        rowValue,
+        this.toSearchableString(field, rowValue),
         filterValue
       )
     )
@@ -1208,6 +1235,10 @@ export class TextFieldType extends FieldType {
     return genericContainsWordFilter
   }
 
+  getStartsWithFilterFunction() {
+    return genericStartsWithFilter
+  }
+
   canBeReferencedByFormulaField() {
     return true
   }
@@ -1326,6 +1357,10 @@ export class LongTextFieldType extends FieldType {
 
   getContainsWordFilterFunction(field) {
     return genericContainsWordFilter
+  }
+
+  getStartsWithFilterFunction() {
+    return genericStartsWithFilter
   }
 
   canBeReferencedByFormulaField() {
@@ -1934,6 +1969,10 @@ export class NumberFieldType extends FieldType {
 
   getContainsFilterFunction() {
     return genericContainsFilter
+  }
+
+  getStartsWithFilterFunction() {
+    return genericStartsWithFilter
   }
 
   canBeReferencedByFormulaField() {
@@ -3286,6 +3325,10 @@ export class URLFieldType extends FieldType {
     return genericContainsWordFilter
   }
 
+  getStartsWithFilterFunction() {
+    return genericStartsWithFilter
+  }
+
   canParseQueryParameter() {
     return true
   }
@@ -3390,6 +3433,10 @@ export class EmailFieldType extends FieldType {
 
   getContainsWordFilterFunction(field) {
     return genericContainsWordFilter
+  }
+
+  getStartsWithFilterFunction() {
+    return genericStartsWithFilter
   }
 
   canBeReferencedByFormulaField() {
@@ -3837,6 +3884,10 @@ export class SingleSelectFieldType extends SelectOptionBaseFieldType {
 
   getContainsWordFilterFunction(field) {
     return genericContainsWordFilter
+  }
+
+  getStartsWithFilterFunction() {
+    return genericStartsWithFilter
   }
 
   canBeReferencedByFormulaField() {
@@ -4309,6 +4360,10 @@ export class PhoneNumberFieldType extends FieldType {
     return genericContainsFilter
   }
 
+  getStartsWithFilterFunction() {
+    return genericStartsWithFilter
+  }
+
   canBeReferencedByFormulaField() {
     return true
   }
@@ -4474,6 +4529,19 @@ export class FormulaFieldType extends mix(
       this._mapFormulaTypeToFieldType(field.formula_type)
     )
     return underlyingFieldType.getContainsWordFilterFunction()
+  }
+
+  /**
+   * Delegate to the underlying field type so the searchable-string conversion
+   * (e.g. a number's raw value vs its formatted display) stays consistent with
+   * the backend, matching how starts_with_query is delegated on the backend.
+   */
+  startsWithFilter(rowValue, filterValue, field) {
+    const underlyingFieldType = this.app.$registry.get(
+      'field',
+      this._mapFormulaTypeToFieldType(field.formula_type)
+    )
+    return underlyingFieldType.startsWithFilter(rowValue, filterValue, field)
   }
 
   toHumanReadableString(field, value) {
@@ -5082,6 +5150,10 @@ export class AutonumberFieldType extends FieldType {
 
   getContainsFilterFunction() {
     return genericContainsFilter
+  }
+
+  getStartsWithFilterFunction() {
+    return genericStartsWithFilter
   }
 
   canBeReferencedByFormulaField() {

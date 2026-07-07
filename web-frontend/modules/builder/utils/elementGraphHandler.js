@@ -31,7 +31,10 @@ export default class ElementGraphHandler extends BaseGraphHandler {
 
   // Follows next[''] chains within each slot (all children at every depth within slots).
   getChildren(targetElement) {
-    return super.getChildren(targetElement, { followChains: true })
+    return super.getChildren(targetElement, {
+      followChains: true,
+      skipMissing: true,
+    })
   }
 
   // Returns the chain of children in a specific container slot.
@@ -39,6 +42,7 @@ export default class ElementGraphHandler extends BaseGraphHandler {
     return super.getChildren(containerElement, {
       slot: place,
       followChains: true,
+      skipMissing: true,
     })
   }
 
@@ -49,30 +53,10 @@ export default class ElementGraphHandler extends BaseGraphHandler {
 
   // Depth-first ordered flat list of all elements.
   getOrderedElements() {
-    const result = []
-    const visited = new Set()
-
-    const visitChain = (firstId) => {
-      let currentId = firstId
-      while (currentId && !visited.has(currentId)) {
-        visited.add(currentId)
-        const el = this.getElement(currentId)
-        if (el) result.push(el)
-        const info = this.graph[currentId]
-        if (!info) break
-
-        if (info.children) {
-          for (const place of Object.keys(info.children).sort()) {
-            const firstChildId = (info.children[place] || [])[0]
-            if (firstChildId) visitChain(firstChildId)
-          }
-        }
-
-        currentId = info.next?.['']?.[0] ?? null
-      }
-    }
-
-    if (this.graph['0']) visitChain(this.graph['0'])
+    const result = this.getPointsInDepthFirstOrder({
+      skipMissing: true,
+      skipChildrenOfMissing: true,
+    })
 
     // Elements that exist on the page but aren't present in the graph (e.g. records
     // created during a not-yet-zero-downtime deployment) are appended at the bottom

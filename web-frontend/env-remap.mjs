@@ -80,6 +80,21 @@ for (const [legacyKey, nuxtKey] of Object.entries(envMapping)) {
   }
 }
 
+// Only override the default when a valid positive integer is provided.
+if (
+  process.env.BASEROW_MAX_FIELD_TEXT_LENGTH !== undefined &&
+  process.env.NUXT_PUBLIC_BASEROW_MAX_FIELD_TEXT_LENGTH === undefined
+) {
+  const maxFieldTextLength = parseInt(
+    process.env.BASEROW_MAX_FIELD_TEXT_LENGTH,
+    10
+  )
+  if (Number.isInteger(maxFieldTextLength) && maxFieldTextLength > 0) {
+    process.env.NUXT_PUBLIC_BASEROW_MAX_FIELD_TEXT_LENGTH =
+      String(maxFieldTextLength)
+  }
+}
+
 // Handle BASEROW_PUBLIC_URL convenience variable (sets both backend and frontend URLs)
 if (process.env.BASEROW_PUBLIC_URL) {
   if (!process.env.NUXT_PUBLIC_PUBLIC_BACKEND_URL) {

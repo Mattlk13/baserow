@@ -3,21 +3,12 @@ from functools import partial
 from django.db import transaction
 from django.dispatch import receiver
 
-from baserow.contrib.database.table.signals import table_schema_changed
 from baserow.contrib.database.ws.fields.signals import RealtimeFieldMessages
 from baserow.core import signals as core_signals
 from baserow.core.ai_provider.signals import ai_provider_availability_changed
-from baserow.core.cache import local_cache
 from baserow.ws.registries import page_registry
 
 from .models import AIField
-
-
-@receiver(table_schema_changed)
-def invalidate_ai_prompt_field_ids_cache(sender, table_id, **kwargs):
-    # Invalidate the cached field ids used by AI prompt validation (see
-    # visitors.get_table_field_ids) when a field is added/updated/trashed/restored.
-    local_cache.delete(f"ai_prompt_table_field_ids_{table_id}")
 
 
 def _broadcast_ai_field_errors(field, related_fields):

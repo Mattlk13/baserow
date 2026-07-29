@@ -204,6 +204,7 @@ class DatabaseConfig(AppConfig):
         from .fields.field_types import (
             AutonumberFieldType,
             BooleanFieldType,
+            ButtonFieldType,
             CountFieldType,
             CreatedByFieldType,
             CreatedOnFieldType,
@@ -258,6 +259,9 @@ class DatabaseConfig(AppConfig):
         field_type_registry.register(AutonumberFieldType())
         field_type_registry.register(PasswordFieldType())
         field_type_registry.register(FormViewEditRowFieldType())
+        # Always registered so tables with existing button fields keep working
+        # when the flag is off; creation is gated in ButtonFieldType.
+        field_type_registry.register(ButtonFieldType())
 
         from .fields.field_aggregations import (
             AverageFieldAggregationType,
@@ -303,6 +307,7 @@ class DatabaseConfig(AppConfig):
 
         from .fields.field_converters import (
             AutonumberFieldConverter,
+            ButtonFieldConverter,
             FileFieldConverter,
             FormulaFieldConverter,
             FormViewEditRowFieldConverter,
@@ -330,6 +335,7 @@ class DatabaseConfig(AppConfig):
         field_converter_registry.register(FormViewEditRowFieldConverter())
         field_converter_registry.register(AutonumberFieldConverter())
         field_converter_registry.register(PasswordFieldConverter())
+        field_converter_registry.register(ButtonFieldConverter())
 
         from .fields.actions import (
             ChangePrimaryFieldActionType,

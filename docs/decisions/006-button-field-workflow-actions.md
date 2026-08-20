@@ -118,23 +118,59 @@ filter) will likely be wanted later. The `service` foreign key therefore goes on
 abstract `DatabaseWorkflowServiceAction`, exactly as in the builder, so frontend-only
 types can be added later without a schema migration.
 
+Phase 1's `url_formula` field attribute was scaffolding, not part of the end state. It
+existed because the button shipped before the action layer. That layer has since arrived:
+opening a URL is a frontend-only `open_url` action like any other, a data migration turns
+every existing `url_formula` into one, and nothing reads the attribute any more. The
+column itself stays on `ButtonField` as deprecated under the zero-downtime rule, to be
+dropped in a later release. A button never carries both a `url_formula` and an action
+list, and nothing is designed around them coexisting.
+
+The builder's `open_page` is the working precedent, not just an analogy. Its `custom`
+navigation branch already stores its target as a formula object, the same shape as
+`url_formula`, so the action type had an implementation to mirror rather than invent.
+
+The client does not, however, run a frontend-only action on its own. A click always calls
+the dispatch endpoint; the endpoint dispatches the service-backed actions, skips the
+frontend-only ones, and hands them back under a `client_actions` key for the browser to
+execute once the response arrives. This is where the database diverges from the builder,
+which does execute its notification and open-page actions without a round trip.
+Implementation established why: running the two kinds in list order would need one
+dispatch call per contiguous run of service-backed actions, and the click lock is keyed on
+`(field_id, row_id)`, so every call after the first would be rejected with 409. Returning
+the whole frontend tail in one response avoids that, and it buys a second property that
+matters now that **same tab** is the default target: a failing action raises before the
+response is built, so `client_actions` never reaches the browser and the navigation does
+not happen, leaving the user on the error toast rather than carrying them away from it.
+The cost is that a frontend-only action always runs after every service-backed one,
+whatever its position in the list.
+
+Public views are not part of that reasoning. An earlier draft of this section argued the
+client-side path preserved the phase-1 behaviour of a URL button working in a publicly
+shared view. That is no longer true and no longer wanted: phase 1 review concluded button
+fields should not appear in public views at all, and `ButtonFieldType` now sets
+`can_be_in_public_view = False`. There is no public-view button left to preserve, so
+nothing in the action design should be shaped around one. Section 7's rule is the whole
+story: buttons are unavailable to anonymous users, whether or not their actions reach the
+server.
+
 ### 3. Execution flow and failure behavior
 
 A dispatch endpoint receives the click, builds a `DatabaseDispatchContext`, and
-dispatches the actions in order. State changes are broadcast over the existing row
-realtime channel, as the AI field already does, so every open view sees the loading
-state.
+dispatches the actions in order. The loading state belongs to the person who clicked:
+their own cell shows it until the response arrives, and ignores further clicks meanwhile.
 
 ```mermaid
 sequenceDiagram
     actor User as Clicking user
+    participant Cell as The clicked cell
     participant API as Dispatch endpoint
     participant H as DatabaseWorkflowActionHandler
     participant SH as ServiceHandler
-    participant WS as Realtime channel
 
-    User->>API: click (button field id, row id)
-    API->>WS: button enters loading state (all open views)
+    User->>Cell: click
+    Cell->>API: dispatch (button field id, row id)
+    Note over Cell: loading until the response arrives
     loop actions in order
         API->>H: dispatch(action, DatabaseDispatchContext)
         H->>SH: dispatch_service(service, context)
@@ -143,11 +179,20 @@ sequenceDiagram
     end
     alt an action fails
         H-->>API: error for the failed action
-        API-->>User: error toast naming the failed action
+        API-->>Cell: error toast naming the failed action
         Note over H: remaining actions are skipped,<br/>completed actions stay
+    else the sequence succeeds
+        API-->>Cell: results, plus the frontend-only actions to run
     end
-    API->>WS: button back to idle, row updates broadcast
 ```
+
+An earlier draft of this section broadcast that loading state to every open view over the
+row realtime channel, the way the AI field does. That was descoped on 2026-07-28 and now
+belongs to phase 4. Local dispatch is synchronous, so the clicking user has the outcome in
+the response, and other viewers see the row changes arrive through the normal row-update
+signals; between the two there is nothing for a concurrent viewer to watch. A broadcast
+loading state is built when external actions make a dispatch slow enough for that gap to
+be worth showing, which is also when the job/Celery pattern arrives.
 
 Failure behavior matches the builder: execution stops at the first failing action, the
 rest are skipped, and the user sees an error toast. Nothing is rolled back, since
@@ -177,11 +222,21 @@ The database module registers two data providers for button dispatch:
   and automation's `PreviousNodeProviderType`, with identifier remapping on import, so
   all three modules keep the same design.
 
-The raw row provider is a snapshot taken at dispatch time: every action sees the row as
-it was when the user clicked, even after an earlier action changed or deleted it;
-fresher values come from the previous-action provider. Like the builder's, both
-providers are implemented on backend and frontend, so the action editor's data explorer
-and the dispatch path see the same shapes.
+The raw row provider reads the row again as each action starts, so an action sees what
+the actions before it did to it. Reading the row after an earlier action deleted it
+fails that action and stops the sequence, rather than resolving to nothing and letting
+the action write blanks. Like the builder's, both providers are implemented on backend
+and frontend, so the action editor's data explorer and the dispatch path see the same
+shapes.
+
+This reverses an earlier decision to make the provider a click-time snapshot. That
+version was never fully true: values held through a related manager, such as link row,
+multiple select and multiple collaborators, were read when the formula ran rather than
+when the click happened, so a sequence mixed snapshotted and live values with no way to
+tell which was which. It also leaned on the previous-action provider as the way to read
+fresher values, which reads a named earlier action's result rather than the row, in a
+different shape from this provider. A click-time snapshot may return later as a provider
+of its own, asked for by name.
 
 ### 5. Integrations and ownership
 
@@ -294,6 +349,16 @@ as today, and their buttons render disabled with an error indicator pointing at 
 integration to reconfigure, reusing the error state the builder already shows for
 misconfigured actions rather than inventing a database-specific one.
 
+**Constraint discovered in implementation.** Actions are serialized from
+`FieldType.export_serialized`, which receives only the field: no `files_zip`, no
+`storage`, and no `import_export_config`. The action export path therefore cannot carry
+files, and cannot apply `exclude_sensitive_data`. This is harmless in v1, since Local
+Baserow services have neither files nor credentials. It does mean the commitment above
+that "exports strip their credentials as today" cannot be honoured through this path
+once external integrations arrive; widening `FieldType.export_serialized` to take the
+same arguments the builder's export path already receives is a prerequisite for that
+work.
+
 ### 7. What kind of field is a button, and who may click it
 
 A button is not a read-only field in the current sense (a server-computed column). It
@@ -325,9 +390,12 @@ it. Concretely:
 - **Field type conversion.** Converting away deletes actions and services; converting
   into a button starts empty. Both directions are destructive, like other fields that
   carry configuration.
-- **Undo/redo.** Configuration changes are undoable like other field updates. Clicks are
-  never undoable, even when a sequence only touches rows: a partially undoable button is
-  more confusing than none.
+- **Undo/redo.** Clicks are never undoable, even when a sequence only touches rows: a
+  partially undoable button is more confusing than none. Nor are the actions themselves
+  yet: the field update around them is undoable, so undoing a save restores the label
+  and leaves the actions as they were saved. Builder workflow actions are the same, and
+  making either undoable needs a way to restore a deleted action with its service, which
+  neither has.
 - **Deleting a user.** Nothing breaks: actions run as whoever clicks, and v1 services
   have no integration, so no button depends on any particular account.
 - **Failure mid-sequence.** Execution stops, later actions are skipped, completed
@@ -397,5 +465,6 @@ defer unifying execution until a real need appears.
 - External integration types are scheduled: ship them with explicit sharing warnings on
   every integration, and plan the ownership iteration (`created_by` plus `is_shared`,
   private by default) with the builder team (section 5).
-- Frontend-only button actions are prioritized: design the shared dispatch mechanism
-  with the builder team before building one alone.
+- A second frontend-only button action is prioritized: `open_url` shipped with a
+  client-side dispatch mechanism of its own (section 2), so the next one is the moment to
+  design a shared one with the builder team rather than copy it a third time.

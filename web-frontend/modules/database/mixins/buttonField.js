@@ -1,32 +1,86 @@
-import {
-  encodeUrlWhitespace,
-  resolveButtonUrl,
-} from '@baserow/modules/database/utils/buttonField'
+import { reactive } from 'vue'
+import WorkflowActionService from '@baserow/modules/database/services/workflowAction'
+import { notifyIf } from '@baserow/modules/core/utils/error'
+import { clone } from '@baserow/modules/core/utils/object'
+
+// Keyed by field and row rather than kept per component. The grid swaps an
+// unselected cell for its own component on the first click, and that remount
+// would drop a flag held in `data`, taking the loading state and the double
+// click guard with it.
+const dispatchesInFlight = reactive(new Set())
 
 /**
- * Computes the {url, label} value of a button field cell. Uses the
- * allFieldsInTable prop where the render context provides it (selected grid
- * cell, row edit modal) and falls back to the field store for contexts that
- * only pass row + field (functional grid cells, cards).
+ * Dispatches a cell's actions on click and runs the ones the backend hands
+ * back. Falls back to the field store where the render context provides no
+ * `allFieldsInTable` (functional grid cells, cards).
  */
 export default {
   computed: {
-    resolvedButtonValue() {
-      // A broken formula (e.g. referencing a deleted field) must disable
-      // the button rather than resolve to a misleading URL.
-      const resolved = this.field.error
-        ? ''
-        : resolveButtonUrl(
-            this.$registry,
-            this.field,
-            this.row,
-            this.allFieldsInTable?.length > 0
-              ? this.allFieldsInTable
-              : this.$store.getters['field/getAll']
-          )
-      return {
-        url: encodeUrlWhitespace(resolved),
-        label: this.field.label,
+    hasWorkflowActions() {
+      return this.field.has_workflow_actions === true
+    },
+    dispatchKey() {
+      return `${this.field.id}:${this.row.id}`
+    },
+    dispatching() {
+      return dispatchesInFlight.has(this.dispatchKey)
+    },
+  },
+  methods: {
+    /**
+     * Runs the field's actions against this row. The backend rejects a
+     * concurrent click for the same field and row, so the local guard only
+     * avoids an obvious double fire.
+     */
+    async dispatchWorkflowActions() {
+      if (this.dispatching) {
+        return
+      }
+      // Captured up front so the release below cannot miss it if the cell is
+      // handed a different row while the request is in flight.
+      const key = this.dispatchKey
+      dispatchesInFlight.add(key)
+      try {
+        // The dispatch takes its own broadcast, so `this.row` can change
+        // mid-request. Client actions get the row as it was at click time.
+        const clickedRow = clone(this.row)
+        const { data } = await WorkflowActionService(this.$client).dispatch(
+          this.field.id,
+          this.row.id
+        )
+        await this.runClientActions(data?.client_actions || [], clickedRow)
+      } catch (error) {
+        // A handled error already carries its own message. Anything else, a
+        // network failure for instance, still needs a toast of its own.
+        if (error.handler) {
+          notifyIf(error, 'workflowAction')
+        } else {
+          this.$store.dispatch('toast/error', {
+            title: this.$t('buttonField.dispatchErrorTitle'),
+            message: this.$t('buttonField.dispatchErrorMessage'),
+          })
+        }
+      } finally {
+        dispatchesInFlight.delete(key)
+      }
+    },
+    /**
+     * Runs the actions the backend hands back for the browser, in the order it
+     * returned them. It only sends them when every server side action
+     * succeeded, so a failed row action never navigates away.
+     */
+    async runClientActions(clientActions, row) {
+      const fields =
+        this.allFieldsInTable?.length > 0
+          ? this.allFieldsInTable
+          : this.$store.getters['field/getAll']
+      for (const workflowAction of clientActions) {
+        await this.$registry
+          .get('databaseWorkflowActionType', workflowAction.type)
+          .execute({
+            workflowAction,
+            applicationContext: { row, fields },
+          })
       }
     },
   },

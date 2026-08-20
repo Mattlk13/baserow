@@ -171,6 +171,13 @@ class FieldType(
     """Indicates whether the field allows inserting/updating row values or if it is
     read only."""
 
+    write_only = False
+    """
+    Indicates whether the stored value must never be handed back, as the password
+    field's hash must not be. Serializers and exports mask such a value already;
+    this marks it for the paths that read the column itself.
+    """
+
     keep_data_on_duplication = True
     """
     Indicates whether the data must be kept when duplicating the field. We typically
@@ -1247,6 +1254,24 @@ class FieldType(
         :param field: A field instance of this field type.
         :param field_cache: A field cache to be used when fetching fields.
         :param id_mapping:
+        """
+
+    def after_field_duplicated(
+        self,
+        original_field: Field,
+        new_field: Field,
+        serialized_field: Dict[str, Any],
+    ) -> None:
+        """
+        Called after a single field has been duplicated, once the new field
+        exists. `duplicate_field` does not go through the serialization import
+        path, so anything a field type keeps outside its own allowed fields has
+        to be copied here.
+
+        :param original_field: The field that was duplicated.
+        :param new_field: The newly created copy.
+        :param serialized_field: The original field's exported representation,
+            minus the keys `duplicate_field` strips.
         """
 
     def after_rows_imported(

@@ -259,9 +259,29 @@ class DatabaseConfig(AppConfig):
         field_type_registry.register(AutonumberFieldType())
         field_type_registry.register(PasswordFieldType())
         field_type_registry.register(FormViewEditRowFieldType())
-        # Always registered so tables with existing button fields keep working
-        # when the flag is off; creation is gated in ButtonFieldType.
+        # Always registered so tables holding an existing button field stay
+        # readable when the flag is off. Creation and dispatch are gated
+        # separately, so a click then answers ERROR_FEATURE_DISABLED.
         field_type_registry.register(ButtonFieldType())
+
+        from .workflow_actions.registries import database_workflow_action_type_registry
+        from .workflow_actions.workflow_action_types import (
+            LocalBaserowCreateRowWorkflowActionType,
+            LocalBaserowDeleteRowWorkflowActionType,
+            LocalBaserowUpdateRowWorkflowActionType,
+            OpenUrlWorkflowActionType,
+        )
+
+        database_workflow_action_type_registry.register(
+            LocalBaserowCreateRowWorkflowActionType()
+        )
+        database_workflow_action_type_registry.register(
+            LocalBaserowUpdateRowWorkflowActionType()
+        )
+        database_workflow_action_type_registry.register(
+            LocalBaserowDeleteRowWorkflowActionType()
+        )
+        database_workflow_action_type_registry.register(OpenUrlWorkflowActionType())
 
         from .fields.field_aggregations import (
             AverageFieldAggregationType,
@@ -796,6 +816,9 @@ class DatabaseConfig(AppConfig):
             DatabaseViewObjectScopeType,
             DatabaseViewSortObjectScopeType,
         )
+        from .workflow_actions.object_scopes import (
+            DatabaseWorkflowActionObjectScopeType,
+        )
 
         object_scope_type_registry.register(DatabaseObjectScopeType())
         object_scope_type_registry.register(DatabaseTableObjectScopeType())
@@ -807,6 +830,7 @@ class DatabaseConfig(AppConfig):
         object_scope_type_registry.register(DatabaseViewFilterObjectScopeType())
         object_scope_type_registry.register(DatabaseViewFilterGroupObjectScopeType())
         object_scope_type_registry.register(TokenObjectScopeType())
+        object_scope_type_registry.register(DatabaseWorkflowActionObjectScopeType())
 
         from baserow.contrib.database.views.operations import (
             CanReceiveNotificationOnSubmitFormViewOperationType,
@@ -933,6 +957,9 @@ class DatabaseConfig(AppConfig):
             TestTriggerWebhookOperationType,
             UpdateWebhookOperationType,
         )
+        from .workflow_actions.operations import (
+            DispatchDatabaseWorkflowActionOperationType,
+        )
 
         operation_type_registry.register(ReadViewRowOperationType())
         operation_type_registry.register(ReadAdjacentViewRowOperationType())
@@ -1043,6 +1070,7 @@ class DatabaseConfig(AppConfig):
         operation_type_registry.register(ListDataSyncJobsOperationType())
         operation_type_registry.register(ListPropertiesOperationType())
         operation_type_registry.register(GetIncludingPublicValuesOperationType())
+        operation_type_registry.register(DispatchDatabaseWorkflowActionOperationType())
 
         from baserow.core.registries import permission_manager_type_registry
 
@@ -1071,11 +1099,15 @@ class DatabaseConfig(AppConfig):
             database_data_provider_type_registry,
         )
 
-        from .rows.data_providers import HumanReadableFieldsDataProviderType
+        from .rows.data_providers import (
+            HumanReadableFieldsDataProviderType,
+            RowDataProviderType,
+        )
 
         database_data_provider_type_registry.register(
             HumanReadableFieldsDataProviderType()
         )
+        database_data_provider_type_registry.register(RowDataProviderType())
 
         # notification_types
         from baserow.contrib.database.fields.notification_types import (
@@ -1240,6 +1272,12 @@ class DatabaseConfig(AppConfig):
         import baserow.contrib.database.views.receivers  # noqa: F401
         import baserow.contrib.database.views.tasks  # noqa: F401
         import baserow.contrib.database.ws.rows.tasks  # noqa: F401
+        from baserow.contrib.database.workflow_actions.receivers import (
+            connect_to_database_workflow_action_pre_delete_signal,
+        )
+
+        connect_to_database_workflow_action_pre_delete_signal()
+
         from baserow.contrib.database.fields.models import SelectOption
 
         # Make sure that from now on, no model can make the User cache to expire,

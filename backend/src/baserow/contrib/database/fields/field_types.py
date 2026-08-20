@@ -149,18 +149,27 @@ from baserow.contrib.database.views.models import (
     FormView,
     View,
 )
+from baserow.contrib.database.workflow_actions.handler import (
+    DatabaseWorkflowActionHandler,
+)
+from baserow.contrib.database.workflow_actions.models import DatabaseWorkflowAction
+from baserow.contrib.database.workflow_actions.registries import (
+    database_workflow_action_type_registry,
+)
 from baserow.core.db import (
     CombinedForeignKeyAndManyToManyMultipleFieldPrefetch,
     collate_expression,
     specific_queryset,
+)
+from baserow.core.deferred_callbacks import (
+    deferred_callback_context,
+    register_deferred_callback,
 )
 from baserow.core.expressions import DateTrunc
 from baserow.core.feature_flags import FF_BUTTON_FIELD, feature_flag_is_enabled
 from baserow.core.fields import SyncedDateTimeField
 from baserow.core.formula import BaserowFormulaException
 from baserow.core.formula.parser.exceptions import FormulaFunctionTypeDoesNotExist
-from baserow.core.formula.serializers import FormulaSerializerField
-from baserow.core.formula.types import BaserowFormulaObject
 from baserow.core.handler import CoreHandler
 from baserow.core.models import UserFile, WorkspaceUser
 from baserow.core.registries import ImportExportConfig
@@ -225,10 +234,6 @@ from .fields import (
     SyncedUserForeignKeyField,
 )
 from .fields import DurationField as DurationModelField
-from .formula_visitors import (
-    extract_field_id_dependencies,
-    replace_field_id_references,
-)
 from .handler import FieldHandler
 from .models import (
     AbstractSelectOption,
@@ -7793,6 +7798,7 @@ class PasswordFieldType(FieldType):
 
     type = "password"
     model_class = PasswordField
+    write_only = True
     can_be_in_form_view = True
     keep_data_on_duplication = True
     _can_order_by_types = []
@@ -7987,17 +7993,37 @@ class FormViewEditRowFieldType(ReadOnlyFieldType):
         pass
 
 
+class UnchangedIdMapping(dict[int, int]):
+    """
+    An import id mapping that maps every id to itself, for a copy that keeps
+    referencing the same objects as its original.
+
+    An empty mapping can't say that: importers read a missing id as "the object
+    is gone" and null the reference. Both `mapping[id]` and `mapping.get(id)`
+    are covered, since importers use either.
+    """
+
+    def __missing__(self, key: int) -> int:
+        return key
+
+    def get(self, key: int, default: Any = None) -> int:
+        return key
+
+
 class ButtonFieldType(ReadOnlyFieldType):
     """
-    Read-only field whose cells render a button opening a URL resolved
-    client-side from the row's values. Stores configuration only; there is no
-    cell data and no database column.
+    Read-only field whose cells render a button running the field's ordered
+    list of workflow actions. Stores configuration only; there is no cell data
+    and no database column.
     """
 
     type = "button"
     model_class = ButtonField
-    allowed_fields = ["label", "url_formula"]
-    serializer_field_names = ["label", "url_formula", "error"]
+    allowed_fields = ["label"]
+    serializer_field_names = [
+        "label",
+        "has_workflow_actions",
+    ]
     serializer_field_overrides = {
         "label": serializers.CharField(
             required=False,
@@ -8006,33 +8032,27 @@ class ButtonFieldType(ReadOnlyFieldType):
             help_text="The text shown on the button. Must be provided when the "
             "field is created, and can't be set to an empty value afterwards.",
         ),
-        "url_formula": FormulaSerializerField(
-            required=False,
-            help_text="Formula resolved per row in the client to build the URL "
-            "the button opens. Can reference the row's fields via "
-            "get('fields.field_<id>').",
-        ),
-        "error": serializers.CharField(
+        "has_workflow_actions": serializers.BooleanField(
             required=False,
             read_only=True,
-            allow_null=True,
-            help_text="The error message if the field's URL formula is broken, "
-            "else null.",
+            help_text="Whether the field has any configured actions. The client "
+            "uses this to decide whether a cell renders a button that dispatches "
+            "actions or an inert one.",
         ),
     }
     api_exceptions_map = {
         ButtonFieldLabelNotProvided: ERROR_BUTTON_FIELD_LABEL_NOT_PROVIDED,
     }
     can_be_in_form_view = False
-    # The label and the URL formula are only meaningful to someone configuring
-    # the field, and they'd be handed to anonymous visitors as-is.
+    # The label is only meaningful to someone configuring the field, and it'd
+    # be handed to anonymous visitors as-is.
     can_be_in_public_view = False
     _can_order_by_types = []
     _can_be_primary_field = False
     can_get_unique_values = False
     keep_data_on_duplication = False
-    # The cell column is always null, so there is nothing worth backing up when
-    # converting to another type; the label and formula are enough to restore.
+    # The cell column is always null, so a type change has no data to back up.
+    # The configuration it must keep rides along in `export_prepared_values`.
     field_data_is_derived_from_attrs = True
 
     def before_create(
@@ -8073,6 +8093,19 @@ class ButtonFieldType(ReadOnlyFieldType):
                 "The label of a button field can't be empty."
             )
 
+    def enhance_field_queryset(
+        self, queryset: QuerySet[Field], field: Field
+    ) -> QuerySet[Field]:
+        # `has_workflow_actions` is serialized for every button field, so
+        # without this a table's field list costs one query per button.
+        return queryset.annotate(
+            **{
+                ButtonField.HAS_WORKFLOW_ACTIONS_ANNOTATION: Exists(
+                    DatabaseWorkflowAction.objects.filter(field_id=OuterRef("pk"))
+                )
+            }
+        )
+
     def get_serializer_field(self, instance, **kwargs):
         # The cell holds nothing, so don't advertise the type of a placeholder
         # column in the API docs and generated schemas.
@@ -8092,132 +8125,136 @@ class ButtonFieldType(ReadOnlyFieldType):
     def random_value(self, instance, fake, cache):
         return None
 
-    def get_export_value(self, value, field_object, rich_value=False):
-        # The URL only exists client-side; exports stay empty.
+    def get_export_value(
+        self, value: Any, field_object: "FieldObject", rich_value: bool = False
+    ) -> Any:
+        # A button holds no cell data, so exports stay empty.
         return None if rich_value else ""
 
-    def get_field_dependencies(
-        self, field_instance: ButtonField, field_cache: "FieldCache"
-    ) -> FieldDependencies:
-        try:
-            field_ids = extract_field_id_dependencies(field_instance.url_formula)
-        except BaserowFormulaException:
-            # Unparseable formulas surface via `error` and have no deps.
-            return []
-
-        if not field_ids:
-            return []
-
-        # The table model is generated once and cached for the whole request or
-        # task, so reading the referenced fields off it costs no extra query
-        # even when many fields are rebuilt at once.
-        model = field_cache.get_model(field_instance.table)
-        existing_field_ids = field_ids & model._field_objects.keys()
-        # A trashed referenced field is declared as a broken reference (by name,
-        # like formula fields) so the edge survives and restoring the field
-        # re-links it and re-reports this field's error to the client.
-        trashed_names = [
-            field_object["field"].name
-            for field_id, field_object in model._trashed_field_objects.items()
-            if field_id in field_ids
+    def export_serialized(
+        self, field: ButtonField, include_allowed_fields: bool = True
+    ) -> Dict[str, Any]:
+        serialized = super().export_serialized(field, include_allowed_fields)
+        serialized["workflow_actions"] = [
+            action.get_type().export_serialized(action)
+            for action in DatabaseWorkflowActionHandler().get_workflow_actions(field)
         ]
-        return [
-            FieldDependency(dependency_id=field_id, dependant=field_instance, via=None)
-            for field_id in existing_field_ids
-        ] + [
-            FieldDependency(
-                broken_reference_field_name=name, dependant=field_instance, via=None
-            )
-            for name in trashed_names
-        ]
+        return serialized
 
-    def _broadcast_error_change(
-        self, field: ButtonField, update_collector, via_path_to_starting_table
-    ):
-        # Push a re-serialization without touching cell values (None statement)
-        # so the client picks up the new `error`.
-        update_collector.add_field_with_pending_update_statement(
-            field, None, via_path_to_starting_table
-        )
-
-    def field_dependency_created(
+    def import_serialized(
         self,
-        field: ButtonField,
-        created_field: Field,
-        update_collector,
-        field_cache: "FieldCache",
-        via_path_to_starting_table=None,
-    ):
-        self._broadcast_error_change(
-            field, update_collector, via_path_to_starting_table
+        table: "Table",
+        serialized_values: Dict[str, Any],
+        import_export_config: ImportExportConfig,
+        id_mapping: Dict[str, Any],
+        deferred_fk_update_collector: DeferredForeignKeyUpdater,
+    ) -> ButtonField:
+        # The actions are stashed on the returned instance and imported in
+        # `after_import_serialized`, once every table and field exists. The
+        # input dict is copied so the caller can reuse it for another import.
+        serialized_values = {**serialized_values}
+        serialized_actions = serialized_values.pop("workflow_actions", [])
+        field = super().import_serialized(
+            table,
+            serialized_values,
+            import_export_config,
+            id_mapping,
+            deferred_fk_update_collector,
         )
-        super().field_dependency_created(
-            field,
-            created_field,
-            update_collector,
-            field_cache,
-            via_path_to_starting_table,
-        )
-
-    def field_dependency_deleted(
-        self,
-        field: ButtonField,
-        deleted_field: Field,
-        update_collector,
-        field_cache: "FieldCache",
-        via_path_to_starting_table=None,
-    ):
-        self._broadcast_error_change(
-            field, update_collector, via_path_to_starting_table
-        )
-        super().field_dependency_deleted(
-            field,
-            deleted_field,
-            update_collector,
-            field_cache,
-            via_path_to_starting_table,
-        )
-
-    def field_dependency_updated(
-        self,
-        field: ButtonField,
-        updated_field: Field,
-        updated_old_field: Field,
-        update_collector,
-        field_cache: "FieldCache",
-        via_path_to_starting_table=None,
-    ):
-        # Nothing to broadcast here: the formula references fields by id, so
-        # renaming or retyping a referenced field can't change the button's
-        # `error`. Only creating and deleting one can, and those have their own
-        # hooks above.
-        super().field_dependency_updated(
-            field,
-            updated_field,
-            updated_old_field,
-            update_collector,
-            field_cache,
-            via_path_to_starting_table,
-        )
+        field._serialized_workflow_actions = serialized_actions
+        # Stashed with them: the service types need it to tell a duplicate from
+        # an import when a target table is outside the id mapping.
+        field._workflow_action_import_config = import_export_config
+        return field
 
     def after_import_serialized(
         self, field: ButtonField, field_cache: "FieldCache", id_mapping: Dict[str, Any]
-    ):
-        if field.url_formula:
-            try:
-                # Assign the whole object, not just the formula string: saving a
-                # bare string makes `to_python` re-wrap it as `simple` mode,
-                # which turns a raw literal URL into an unparseable formula.
-                url_formula = BaserowFormulaObject.to_formula(field.url_formula)
-                field.url_formula = {
-                    **url_formula,
-                    "formula": replace_field_id_references(
-                        url_formula, id_mapping["database_fields"]
-                    ),
-                }
-                field.save()
-            except (KeyError, BaserowFormulaException):
-                # Missing mapping / unparseable formula: keep as-is so the
-                # import succeeds; broken state surfaces via `error`.
-                pass
+    ) -> None:
+        serialized_actions = getattr(field, "_serialized_workflow_actions", None) or []
+        import_export_config = getattr(field, "_workflow_action_import_config", None)
+
+        def import_workflow_actions():
+            # Deferred: an action can target another database, and this hook
+            # runs at the end of one database's import, so such a reference
+            # would be read as trashed and nulled.
+            for serialized_action in serialized_actions:
+                action_type = database_workflow_action_type_registry.get(
+                    serialized_action["type"]
+                )
+                action_type.import_serialized(
+                    field,
+                    serialized_action,
+                    id_mapping,
+                    import_export_config=import_export_config,
+                )
+
+        if serialized_actions:
+            register_deferred_callback(import_workflow_actions)
+
         FieldDependencyHandler.rebuild_dependencies([field], field_cache)
+
+    def after_field_duplicated(
+        self,
+        original_field: ButtonField,
+        new_field: ButtonField,
+        serialized_field: Dict[str, Any],
+    ) -> None:
+        # Field duplication skips the serialization import path, so without
+        # this the actions would be dropped (ADR 006 section 8).
+        self._recreate_workflow_actions(
+            new_field, serialized_field.get("workflow_actions") or []
+        )
+
+    def export_prepared_values(self, field: ButtonField) -> Dict[str, Any]:
+        values = super().export_prepared_values(field)
+        # A type change deletes the row the actions cascade off, so only this
+        # backup can bring them back.
+        values["workflow_actions"] = [
+            action.get_type().export_serialized(action)
+            for action in DatabaseWorkflowActionHandler().get_workflow_actions(field)
+        ]
+        return values
+
+    def after_update(
+        self,
+        from_field,
+        to_field,
+        from_model,
+        to_model,
+        user,
+        connection,
+        altered_column,
+        before,
+        to_field_kwargs,
+    ):
+        # A button that stayed one kept its actions; importing would double them.
+        if isinstance(from_field, ButtonField):
+            return
+
+        self._recreate_workflow_actions(
+            to_field, to_field_kwargs.get("workflow_actions") or []
+        )
+
+    def _recreate_workflow_actions(
+        self, field: ButtonField, serialized_actions: List[Dict[str, Any]]
+    ) -> None:
+        """Recreates the serialized actions on the field, in order."""
+
+        if not serialized_actions:
+            return
+
+        # The actions land beside the ones they came from, so every table and
+        # field they reference still exists under its own id.
+        id_mapping = {
+            "database_tables": UnchangedIdMapping(),
+            "database_fields": UnchangedIdMapping(),
+        }
+
+        # Opened only because the action import registers a deferred callback,
+        # which raises when no context is active.
+        with deferred_callback_context():
+            for serialized_action in serialized_actions:
+                action_type = database_workflow_action_type_registry.get(
+                    serialized_action["type"]
+                )
+                action_type.import_serialized(field, serialized_action, id_mapping)

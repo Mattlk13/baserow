@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
 from django.db import connection
-from django.test.utils import override_settings
+from django.test.utils import CaptureQueriesContext, override_settings
 from django.urls import reverse
 
 import pytest
@@ -11,8 +11,16 @@ from rest_framework.status import (
     HTTP_403_FORBIDDEN,
 )
 
+from baserow.contrib.database.fields.actions import UpdateFieldActionType
 from baserow.contrib.database.fields.handler import FieldHandler
-from baserow.contrib.database.fields.models import ButtonField
+from baserow.contrib.database.fields.models import ButtonField, Field
+from baserow.contrib.database.workflow_actions.models import (
+    DatabaseWorkflowAction,
+    LocalBaserowCreateRowWorkflowAction,
+    OpenUrlWorkflowAction,
+)
+from baserow.core.action.handler import ActionHandler
+from baserow.core.action.registries import action_type_registry
 from baserow.core.trash.handler import TrashHandler
 
 
@@ -20,7 +28,6 @@ from baserow.core.trash.handler import TrashHandler
 def test_create_button_field_via_api(api_client, data_fixture):
     user, token = data_fixture.create_user_and_token()
     table = data_fixture.create_database_table(user=user)
-    text_field = data_fixture.create_text_field(table=table, name="Name")
 
     response = api_client.post(
         reverse("api:database:fields:list", kwargs={"table_id": table.id}),
@@ -28,12 +35,6 @@ def test_create_button_field_via_api(api_client, data_fixture):
             "name": "Open profile",
             "type": "button",
             "label": "Open",
-            "url_formula": {
-                "formula": (
-                    f"concat('https://example.com/', get('fields.field_{text_field.id}'))"
-                ),
-                "mode": "simple",
-            },
         },
         format="json",
         HTTP_AUTHORIZATION=f"JWT {token}",
@@ -44,8 +45,10 @@ def test_create_button_field_via_api(api_client, data_fixture):
     assert data["type"] == "button"
     assert data["label"] == "Open"
     assert data["read_only"] is True
-    assert data["error"] is None
-    assert f"field_{text_field.id}" in data["url_formula"]["formula"]
+    assert data["has_workflow_actions"] is False
+    # A button's URL lives on its `open_url` action, not on the field.
+    assert "url_formula" not in data
+    assert "error" not in data
 
 
 @pytest.mark.django_db
@@ -73,6 +76,10 @@ def test_existing_button_field_keeps_working_with_flag_disabled(
     table = data_fixture.create_database_table(user=user)
     data_fixture.create_text_field(table=table)
     button_field = data_fixture.create_button_field(table=table, name="btn")
+    data_fixture.create_database_workflow_action(
+        OpenUrlWorkflowAction, field=button_field
+    )
+    row = table.get_model().objects.create()
 
     # The type stays registered when the flag is off, so tables containing an
     # existing button field must keep listing fields and rows normally.
@@ -83,7 +90,11 @@ def test_existing_button_field_keeps_working_with_flag_disabled(
         )
         assert response.status_code == HTTP_200_OK
         assert any(
-            field["id"] == button_field.id and field["type"] == "button"
+            field["id"] == button_field.id
+            and field["type"] == "button"
+            # Serialized regardless of the flag, so the cell still renders an
+            # enabled button.
+            and field["has_workflow_actions"] is True
             for field in response.json()
         )
 
@@ -93,25 +104,19 @@ def test_existing_button_field_keeps_working_with_flag_disabled(
         )
         assert response.status_code == HTTP_200_OK
 
-
-@pytest.mark.django_db
-def test_create_button_field_with_invalid_formula_via_api(api_client, data_fixture):
-    user, token = data_fixture.create_user_and_token()
-    table = data_fixture.create_database_table(user=user)
-
-    response = api_client.post(
-        reverse("api:database:fields:list", kwargs={"table_id": table.id}),
-        {
-            "name": "Broken",
-            "type": "button",
-            "url_formula": {"formula": "concat(broken", "mode": "simple"},
-        },
-        format="json",
-        HTTP_AUTHORIZATION=f"JWT {token}",
-    )
-
-    assert response.status_code == HTTP_400_BAD_REQUEST
-    assert response.json()["error"] == "ERROR_REQUEST_BODY_VALIDATION"
+        # Only reading keeps working with the flag off. The cell still renders
+        # an enabled button, but the click itself is refused.
+        response = api_client.post(
+            reverse(
+                "api:database:workflow_actions:dispatch",
+                kwargs={"field_id": button_field.id},
+            ),
+            {"row_id": row.id},
+            format="json",
+            HTTP_AUTHORIZATION=f"JWT {token}",
+        )
+        assert response.status_code == HTTP_403_FORBIDDEN
+        assert response.json()["error"] == "ERROR_FEATURE_DISABLED"
 
 
 @pytest.mark.django_db
@@ -154,164 +159,6 @@ def test_button_field_row_value_is_null(api_client, data_fixture):
 
     assert response.status_code == HTTP_200_OK
     assert response.json()[f"field_{button_field.id}"] is None
-
-
-@pytest.mark.django_db
-def test_button_field_error_when_referenced_field_trashed(data_fixture):
-    user = data_fixture.create_user()
-    table = data_fixture.create_database_table(user=user)
-    text_field = data_fixture.create_text_field(table=table)
-    button_field = data_fixture.create_button_field(
-        table=table,
-        url_formula={
-            "formula": f"get('fields.field_{text_field.id}')",
-            "mode": "simple",
-        },
-    )
-
-    assert button_field.error is None
-    FieldHandler().delete_field(user, text_field)
-    button_field.refresh_from_db()
-    assert button_field.error == (
-        "The formula references a field that no longer exists."
-    )
-
-
-@pytest.mark.django_db
-@patch("baserow.contrib.database.fields.signals.field_restored.send")
-def test_restoring_referenced_field_clears_button_field_error(
-    field_restored_mock, data_fixture
-):
-    user = data_fixture.create_user()
-    table = data_fixture.create_database_table(user=user)
-    text_field = data_fixture.create_text_field(table=table)
-    button_field = FieldHandler().create_field(
-        user,
-        table,
-        "button",
-        name="btn",
-        label="Open",
-        url_formula={
-            "formula": f"get('fields.field_{text_field.id}')",
-            "mode": "simple",
-        },
-    )
-
-    FieldHandler().delete_field(user, text_field)
-    button_field.refresh_from_db()
-    assert button_field.error is not None
-
-    # Restoring the referenced field must report the button field as updated so
-    # the client re-fetches it and sees the error is gone. This is what
-    # `field_dependency_updated` is for.
-    TrashHandler.restore_item(user, "field", text_field.id)
-    related = field_restored_mock.call_args[1]["related_fields"]
-    assert button_field.id in [f.id for f in related]
-
-    button_field.refresh_from_db()
-    assert button_field.error is None
-
-
-@pytest.mark.django_db
-def test_duplicate_table_remaps_button_url_formula_references(data_fixture):
-    from baserow.contrib.database.table.handler import TableHandler
-
-    user = data_fixture.create_user()
-    table = data_fixture.create_database_table(user=user)
-    text_field = data_fixture.create_text_field(table=table)
-    data_fixture.create_button_field(
-        table=table,
-        name="btn",
-        url_formula={
-            "formula": f"get('fields.field_{text_field.id}')",
-            "mode": "simple",
-        },
-    )
-
-    duplicated_table = TableHandler().duplicate_table(user, table)
-    new_button = ButtonField.objects.get(table=duplicated_table)
-    new_text_field_id = duplicated_table.field_set.exclude(id=new_button.id).get().id
-
-    assert new_button.url_formula["formula"] == (
-        f"get('fields.field_{new_text_field_id}')"
-    )
-    assert new_button.url_formula["mode"] == "simple"
-    assert new_button.error is None
-
-
-@pytest.mark.django_db
-def test_duplicate_table_keeps_button_url_formula_mode(data_fixture):
-    from baserow.contrib.database.table.handler import TableHandler
-
-    user = data_fixture.create_user()
-    table = data_fixture.create_database_table(user=user)
-    text_field = data_fixture.create_text_field(table=table)
-    data_fixture.create_button_field(
-        table=table,
-        name="btn",
-        url_formula={
-            "formula": f"get('fields.field_{text_field.id}')",
-            "mode": "advanced",
-        },
-    )
-
-    duplicated_table = TableHandler().duplicate_table(user, table)
-    new_button = ButtonField.objects.get(table=duplicated_table)
-    new_text_field_id = duplicated_table.field_set.exclude(id=new_button.id).get().id
-
-    # Remapping must not reset the mode, otherwise the copy opens in the wrong
-    # editor and, for raw formulas, stops resolving entirely.
-    assert new_button.url_formula["mode"] == "advanced"
-    assert new_button.url_formula["formula"] == (
-        f"get('fields.field_{new_text_field_id}')"
-    )
-
-
-@pytest.mark.django_db
-def test_duplicate_table_keeps_raw_button_url_formula_working(data_fixture):
-    from baserow.contrib.database.table.handler import TableHandler
-
-    user = data_fixture.create_user()
-    table = data_fixture.create_database_table(user=user)
-    data_fixture.create_button_field(
-        table=table,
-        name="btn",
-        url_formula={"formula": "https://example.com?x=(1", "mode": "raw"},
-    )
-
-    duplicated_table = TableHandler().duplicate_table(user, table)
-    new_button = ButtonField.objects.get(table=duplicated_table)
-
-    # A raw formula is literal text that is never parsed. Downgrading it to
-    # `simple` would make this unparseable and break the duplicated button.
-    assert new_button.url_formula["mode"] == "raw"
-    assert new_button.url_formula["formula"] == "https://example.com?x=(1"
-    assert new_button.error is None
-
-
-@pytest.mark.django_db
-def test_duplicate_table_with_button_field_broken_references(data_fixture):
-    from baserow.contrib.database.table.handler import TableHandler
-
-    user = data_fixture.create_user()
-    table = data_fixture.create_database_table(user=user)
-    data_fixture.create_button_field(
-        table=table,
-        name="btn",
-        url_formula={
-            "formula": "concat('test:',get('fields.field_0'))",
-            "mode": "simple",
-        },
-    )
-
-    # A reference to a field missing from the id mapping must not fail the
-    # duplication; the formula is kept as-is.
-    duplicated_table = TableHandler().duplicate_table(user, table)
-    new_button = ButtonField.objects.get(table=duplicated_table)
-
-    assert new_button.url_formula["formula"] == (
-        "concat('test:',get('fields.field_0'))"
-    )
 
 
 @pytest.mark.django_db
@@ -361,6 +208,74 @@ def test_converting_to_and_from_a_button_field(data_fixture):
     assert text_model._meta.get_field(field.db_column).column == field.db_column
     # The button held no data, so the recreated column starts empty.
     assert getattr(text_model.objects.get(pk=row.id), field.db_column) is None
+
+
+@pytest.mark.django_db
+@pytest.mark.undo_redo
+def test_undoing_a_conversion_away_from_a_button_restores_its_actions(data_fixture):
+    """The actions cascade off the row a type change deletes, so the backup
+    has to carry them."""
+
+    session_id = "session-id"
+    user = data_fixture.create_user(session_id=session_id)
+    table = data_fixture.create_database_table(user=user)
+    button_field = data_fixture.create_button_field(table=table, label="Open")
+    data_fixture.create_database_workflow_action(
+        OpenUrlWorkflowAction,
+        field=button_field,
+        url={"mode": "simple", "version": "0.1", "formula": "'https://baserow.io'"},
+        target="blank",
+    )
+    data_fixture.create_database_workflow_action(
+        LocalBaserowCreateRowWorkflowAction, field=button_field
+    )
+
+    action_type_registry.get_by_type(UpdateFieldActionType).do(
+        user, FieldHandler().get_specific_field_for_update(button_field.id), "text"
+    )
+    assert DatabaseWorkflowAction.objects.filter(field_id=button_field.id).count() == 0
+
+    ActionHandler.undo(user, [UpdateFieldActionType.scope(table.id)], session_id)
+
+    field = Field.objects.get(id=button_field.id).specific
+    assert isinstance(field, ButtonField)
+    assert field.label == "Open"
+
+    restored = list(DatabaseWorkflowAction.objects.filter(field_id=field.id))
+    assert [action.get_type().type for action in restored] == [
+        "open_url",
+        "local_baserow_create_row",
+    ]
+    open_url = restored[0].specific
+    assert open_url.url["formula"] == "'https://baserow.io'"
+    assert open_url.target == "blank"
+    # A create row action is useless without its service.
+    assert restored[1].specific.service_id is not None
+
+
+@pytest.mark.django_db
+@pytest.mark.undo_redo
+def test_undoing_a_label_change_leaves_the_actions_alone(data_fixture):
+    """A same type update never drops them, so restoring would duplicate."""
+
+    session_id = "session-id"
+    user = data_fixture.create_user(session_id=session_id)
+    table = data_fixture.create_database_table(user=user)
+    button_field = data_fixture.create_button_field(table=table, label="Open")
+    data_fixture.create_database_workflow_action(
+        OpenUrlWorkflowAction, field=button_field
+    )
+
+    action_type_registry.get_by_type(UpdateFieldActionType).do(
+        user,
+        FieldHandler().get_specific_field_for_update(button_field.id),
+        label="Renamed",
+    )
+    ActionHandler.undo(user, [UpdateFieldActionType.scope(table.id)], session_id)
+
+    field = Field.objects.get(id=button_field.id).specific
+    assert field.label == "Open"
+    assert DatabaseWorkflowAction.objects.filter(field_id=field.id).count() == 1
 
 
 @pytest.mark.django_db
@@ -430,7 +345,6 @@ def test_create_button_field_without_a_label_via_api(api_client, data_fixture):
         {
             "name": "Open profile",
             "type": "button",
-            "url_formula": {"formula": "'https://example.com'", "mode": "simple"},
         },
         format="json",
         HTTP_AUTHORIZATION=f"JWT {token}",
@@ -489,12 +403,13 @@ def test_updating_a_button_field_without_a_label_keeps_the_existing_one(
     # An update that doesn't mention the label isn't a request to empty it.
     response = api_client.patch(
         reverse("api:database:fields:item", kwargs={"field_id": button_field.id}),
-        {"url_formula": {"formula": "'https://example.com'", "mode": "simple"}},
+        {"name": "Renamed"},
         format="json",
         HTTP_AUTHORIZATION=f"JWT {token}",
     )
 
     assert response.status_code == HTTP_200_OK, response.json()
+    assert response.json()["name"] == "Renamed"
     assert response.json()["label"] == "Open"
 
 
@@ -594,3 +509,76 @@ def test_button_field_changes_are_not_broadcast_to_public_views(
         for call in mock_broadcast_to_channel_group.delay.mock_calls
         if call.args and call.args[0] == f"view-{grid_view.slug}"
     ] == []
+
+
+@pytest.mark.django_db
+def test_button_field_reports_whether_it_has_actions(api_client, data_fixture):
+    from baserow.contrib.database.workflow_actions.models import (
+        LocalBaserowCreateRowWorkflowAction,
+    )
+
+    user, token = data_fixture.create_user_and_token()
+    table = data_fixture.create_database_table(user=user)
+    button_field = data_fixture.create_button_field(table=table, label="Go")
+
+    def get_payload():
+        response = api_client.get(
+            reverse("api:database:fields:item", kwargs={"field_id": button_field.id}),
+            HTTP_AUTHORIZATION=f"JWT {token}",
+        )
+        assert response.status_code == HTTP_200_OK, response.json()
+        return response.json()
+
+    assert get_payload()["has_workflow_actions"] is False
+
+    data_fixture.create_database_workflow_action(
+        LocalBaserowCreateRowWorkflowAction, field=button_field
+    )
+
+    assert get_payload()["has_workflow_actions"] is True
+
+
+@pytest.mark.django_db
+def test_listing_fields_does_not_query_per_button_field(api_client, data_fixture):
+    """
+    `has_workflow_actions` is serialized for every button field, so it is
+    annotated in bulk rather than asked per field. Counting queries instead of
+    pinning a number, so the test says only what it means to.
+    """
+
+    from baserow.contrib.database.workflow_actions.models import (
+        LocalBaserowCreateRowWorkflowAction,
+    )
+
+    user, token = data_fixture.create_user_and_token()
+    table = data_fixture.create_database_table(user=user)
+    url = reverse("api:database:fields:list", kwargs={"table_id": table.id})
+
+    def list_fields():
+        with CaptureQueriesContext(connection) as captured:
+            response = api_client.get(url, HTTP_AUTHORIZATION=f"JWT {token}")
+            assert response.status_code == HTTP_200_OK, response.json()
+        return response.json(), len(captured)
+
+    first = data_fixture.create_button_field(table=table, label="One")
+    data_fixture.create_database_workflow_action(
+        LocalBaserowCreateRowWorkflowAction, field=first
+    )
+
+    # The first request of the test warms content types and the generated
+    # model, which would otherwise show up as a saving rather than a cost.
+    list_fields()
+    _, one_button_queries = list_fields()
+
+    for label in ["Two", "Three", "Four"]:
+        extra = data_fixture.create_button_field(table=table, label=label)
+        data_fixture.create_database_workflow_action(
+            LocalBaserowCreateRowWorkflowAction, field=extra
+        )
+
+    payload, four_button_queries = list_fields()
+
+    buttons = [field for field in payload if field["type"] == "button"]
+    assert len(buttons) == 4
+    assert all(field["has_workflow_actions"] is True for field in buttons)
+    assert four_button_queries == one_button_queries

@@ -19,6 +19,7 @@ import {
   LocalBaserowListRowsServiceType,
   LocalBaserowAggregateRowsServiceType,
 } from '@baserow/modules/integrations/localBaserow/serviceTypes'
+import LocalBaserowNodeServiceForm from '@baserow/modules/automation/components/workflow/LocalBaserowNodeServiceForm'
 import {
   CoreCSVFileReaderServiceType,
   CoreHTTPRequestServiceType,
@@ -369,6 +370,14 @@ export class NodeType extends Registerable {
 }
 
 export class LocalBaserowNodeType extends NodeType {
+  /**
+   * A wrapper around the service form, so the node can pick its integration
+   * first and hand the form the databases it reaches.
+   */
+  get formComponent() {
+    return LocalBaserowNodeServiceForm
+  }
+
   /**
    * Responsible for returning contextual data for a node label template.
    * At the moment we only refer to the table name.

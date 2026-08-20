@@ -1,31 +1,28 @@
 <template>
   <div>
     <Button
-      v-if="isValid(resolvedButtonValue)"
-      :href="getHref(resolvedButtonValue)"
-      tag="a"
-      target="_blank"
-      rel="nofollow noopener noreferrer"
+      v-if="hasWorkflowActions"
       size="tiny"
       type="secondary"
+      :loading="dispatching"
       class="forced-pointer-events-auto"
       @mousedown.stop
+      @click="dispatchWorkflowActions"
     >
-      {{ resolvedButtonValue.label }}
+      {{ field.label }}
     </Button>
-    <Button v-else tag="a" type="secondary" size="tiny" disabled>
-      {{ resolvedButtonValue.label }}
+    <Button v-else size="tiny" type="secondary" disabled>
+      {{ field.label }}
     </Button>
   </div>
 </template>
 
 <script>
-import linkURLField from '@baserow/modules/database/mixins/linkURLField'
 import buttonField from '@baserow/modules/database/mixins/buttonField'
 
 export default {
   name: 'RowCardFieldButtonField',
-  mixins: [linkURLField, buttonField],
+  mixins: [buttonField],
   props: {
     row: { type: Object, required: true },
     field: { type: Object, required: true },

@@ -36,6 +36,12 @@ export const mutations = {
     const fieldToUpdate = storedField || field
     fieldToUpdate.error = value
   },
+  SET_ITEM_VALUES(state, { id, values }) {
+    const storedField = state.items.find((item) => item.id === id)
+    if (storedField) {
+      Object.assign(storedField, values)
+    }
+  },
   SET_LOADED(state, value) {
     state.loaded = value
       ? { tableId: value.tableId, viewId: value.viewId }
@@ -79,6 +85,13 @@ export const actions = {
    */
   setItemError({ commit }, { field, value }) {
     commit('SET_ITEM_ERROR', { field, value })
+  },
+  /**
+   * Patches a stored field with values its save response could not carry,
+   * because the field type wrote more after the response was built.
+   */
+  setItemValues({ commit }, { id, values }) {
+    commit('SET_ITEM_VALUES', { id, values })
   },
   /**
    * Refreshes computed field errors for the table cached in the field store.

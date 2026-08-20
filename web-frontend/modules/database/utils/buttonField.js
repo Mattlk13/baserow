@@ -1,49 +1,55 @@
-import { resolveFormula } from '@baserow/modules/core/formula'
-import RuntimeFormulaContext from '@baserow/modules/core/runtimeFormulaContext'
-
-/**
- * Resolves a button field's URL formula against a row, client-side. Returns
- * the resolved text as the user built it, so it can also be shown as the
- * button's label. Returns an empty string when the formula is empty or cannot
- * be resolved.
- */
-export function resolveButtonUrl($registry, field, row, fields) {
-  const formulaObject = field.url_formula
-  if (!formulaObject?.formula) {
-    return ''
-  }
-  const formulaFunctions = {
-    get: (name) => $registry.get('runtimeFormulaFunction', name),
-  }
-  const runtimeFormulaContext = new Proxy(
-    new RuntimeFormulaContext($registry.getAll('databaseDataProvider'), {
-      row,
-      fields,
-    }),
-    {
-      get(target, prop) {
-        return target.get(prop)
-      },
-    }
-  )
-  const result = resolveFormula(
-    formulaObject,
-    formulaFunctions,
-    runtimeFormulaContext
-  )
-  if (result === null || result === undefined) {
-    return ''
-  }
-  return `${result}`.trim()
-}
-
 /**
  * Percent-encodes the whitespace in a resolved URL. Row values often contain
- * spaces and browsers accept them by encoding, but our URL validation does
- * not. Only whitespace is touched: anything more would mangle the URL
- * structure the formula builds, and would double-encode a value the user
- * already escaped with `encode_uri_component()`.
+ * spaces, which our URL validation rejects. Only whitespace is touched, or we
+ * would mangle or double-encode the rest.
  */
 export function encodeUrlWhitespace(url) {
   return url.replace(/\s/g, (character) => encodeURIComponent(character))
+}
+
+/**
+ * Mirrors the builder's `ALLOWED_LINK_PROTOCOLS`, duplicated so this module
+ * does not depend on the builder module.
+ */
+export const ALLOWED_BUTTON_URL_PROTOCOLS = [
+  'ftp:',
+  'ftps:',
+  'ftpes:',
+  'http:',
+  'https:',
+  'mailto:',
+  'sftp:',
+  'sms:',
+  'tel:',
+]
+
+/**
+ * Only used so a relative URL parses at all. Its protocol is an allowed one,
+ * so relative URLs keep passing through.
+ */
+const RELATIVE_URL_BASE = 'http://baserow.invalid'
+
+/**
+ * Returns the URL when its protocol is allowed and an empty string when it is
+ * not, which is what keeps a formula-built `javascript:` URL from being
+ * navigated to. A URL without a protocol is relative and passes through.
+ *
+ * The protocol comes from `new URL()`, the same parse the browser runs, rather
+ * than a regex: the parser strips leading C0 controls first, so a regex would
+ * read `\x01javascript:` as relative while the browser still runs it.
+ *
+ * The original string is returned, since parsing re-encodes what the formula
+ * deliberately built.
+ */
+export function urlWithAllowedProtocol(url) {
+  let protocol
+  try {
+    protocol = new URL(url, RELATIVE_URL_BASE).protocol
+  } catch (error) {
+    // Not something the browser could navigate to either.
+    return ''
+  }
+  return ALLOWED_BUTTON_URL_PROTOCOLS.includes(protocol.toLowerCase())
+    ? url
+    : ''
 }

@@ -250,6 +250,12 @@ class ServiceType(
         return None
 
     def requires_integration(self, service: ServiceSubClass) -> bool:
+        """
+        Whether this service needs an integration to be dispatched.
+
+        :param service: The service in question.
+        """
+
         return self.integration_type is not None
 
     def formulas_to_resolve(self, service: ServiceSubClass) -> list[FormulaToResolve]:

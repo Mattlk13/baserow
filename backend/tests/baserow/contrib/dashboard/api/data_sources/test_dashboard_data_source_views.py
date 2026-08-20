@@ -514,11 +514,17 @@ def test_dispatch_data_source_improperly_configured(api_client, data_fixture):
         "The field property is missing."
     )
 
+    # Fully configured except for the integration, so the error below is about
+    # the missing integration and nothing else.
     data_source_missing_integration = (
         data_fixture.create_dashboard_local_baserow_aggregate_rows_data_source(
             user=user,
             dashboard=dashboard,
             integration=None,
+            view=view,
+            table=table,
+            field=fields[0],
+            aggregation_type="sum",
         )
     )
 

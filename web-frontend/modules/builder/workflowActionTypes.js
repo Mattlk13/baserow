@@ -282,6 +282,14 @@ export class WorkflowActionServiceType extends WorkflowActionType {
     return WorkflowActionWithService
   }
 
+  /**
+   * Whether the form should offer an integration dropdown. False for services
+   * that offer one themselves.
+   */
+  get picksIntegration() {
+    return false
+  }
+
   get label() {
     return this.serviceType.name
   }
@@ -377,6 +385,16 @@ export class WorkflowActionServiceType extends WorkflowActionType {
   }
 }
 
+/**
+ * A Local Baserow action reaches its tables through an integration, which the
+ * action itself chooses.
+ */
+export class LocalBaserowWorkflowActionServiceType extends WorkflowActionServiceType {
+  get picksIntegration() {
+    return true
+  }
+}
+
 export class CoreHTTPRequestWorkflowActionType extends WorkflowActionServiceType {
   static getType() {
     return 'http_request'
@@ -442,7 +460,7 @@ export class CoreStartWorkflowWorkflowActionType extends WorkflowActionServiceTy
   }
 }
 
-export class CreateRowWorkflowActionType extends WorkflowActionServiceType {
+export class CreateRowWorkflowActionType extends LocalBaserowWorkflowActionServiceType {
   static getType() {
     return 'create_row'
   }
@@ -459,7 +477,7 @@ export class CreateRowWorkflowActionType extends WorkflowActionServiceType {
   }
 }
 
-export class LocalBaserowCreateRowsWorkflowActionType extends WorkflowActionServiceType {
+export class LocalBaserowCreateRowsWorkflowActionType extends LocalBaserowWorkflowActionServiceType {
   static getType() {
     return 'local_baserow_create_rows'
   }
@@ -480,7 +498,7 @@ export class LocalBaserowCreateRowsWorkflowActionType extends WorkflowActionServ
   }
 }
 
-export class UpdateRowWorkflowActionType extends WorkflowActionServiceType {
+export class UpdateRowWorkflowActionType extends LocalBaserowWorkflowActionServiceType {
   static getType() {
     return 'update_row'
   }
@@ -497,7 +515,7 @@ export class UpdateRowWorkflowActionType extends WorkflowActionServiceType {
   }
 }
 
-export class LocalBaserowUpdateRowsWorkflowActionType extends WorkflowActionServiceType {
+export class LocalBaserowUpdateRowsWorkflowActionType extends LocalBaserowWorkflowActionServiceType {
   static getType() {
     return 'local_baserow_update_rows'
   }
@@ -518,7 +536,7 @@ export class LocalBaserowUpdateRowsWorkflowActionType extends WorkflowActionServ
   }
 }
 
-export class DeleteRowWorkflowActionType extends WorkflowActionServiceType {
+export class DeleteRowWorkflowActionType extends LocalBaserowWorkflowActionServiceType {
   static getType() {
     return 'delete_row'
   }

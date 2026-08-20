@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
+from django.contrib.auth.models import AbstractUser
+
 from baserow.core.formula.runtime_formula_context import RuntimeFormulaContext
 from baserow.core.services.models import Service
 from baserow.core.services.types import RuntimeFormulaContextSubClass
@@ -30,6 +32,7 @@ class DispatchContext(RuntimeFormulaContext, ABC):
         update_sample_data_for: Optional[List[Service]] = None,
         use_sample_data: bool = False,
         force_outputs: Dict[int, str] = None,
+        actor: Optional[AbstractUser] = None,
     ):
         """
         This abstract base class provides context needed by specific
@@ -42,6 +45,8 @@ class DispatchContext(RuntimeFormulaContext, ABC):
         :param use_sample_data: Whether to use or update the sample_data.
         :param force_outputs: Mapping of service IDs and previous service
             outputs. Can be used to force a specific service to be dispatched.
+        :param actor: The user this dispatch acts as, for services that have no
+            integration to supply one.
         """
 
         self.cache = {}  # can be used by data providers to save queries
@@ -50,6 +55,7 @@ class DispatchContext(RuntimeFormulaContext, ABC):
         self.use_sample_data = use_sample_data
         self.force_outputs = force_outputs
         self.event_payload = event_payload
+        self.actor = actor
         super().__init__()
 
     @abstractmethod
@@ -67,6 +73,9 @@ class DispatchContext(RuntimeFormulaContext, ABC):
         """
         Return a new DispatchContext instance cloned from the current context, without
         losing the original cached data and call stack but updating some properties.
+
+        The actor is carried over explicitly rather than via `own_properties`, so
+        it survives subclasses that replace that list.
         """
 
         new_values = {}
@@ -74,7 +83,9 @@ class DispatchContext(RuntimeFormulaContext, ABC):
             new_values[prop] = getattr(self, prop)
         new_values.update(kwargs)
 
+        actor = new_values.pop("actor", self.actor)
         new_context = self.__class__(**new_values)
+        new_context.actor = actor
         new_context.cache = {**self.cache}
         new_context.call_stack = set(self.call_stack)
 

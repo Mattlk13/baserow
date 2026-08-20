@@ -41,6 +41,7 @@ from baserow.contrib.database.fields.field_types import (
     MultipleCollaboratorsFieldType,
 )
 from baserow.contrib.database.fields.handler import FieldHandler
+from baserow.contrib.database.fields.models import Field
 from baserow.contrib.database.fields.operations import WriteFieldValuesOperationType
 from baserow.contrib.database.fields.registries import (
     field_aggregation_registry,
@@ -118,11 +119,13 @@ from baserow.core.formula.validator import (
     ensure_object,
 )
 from baserow.core.handler import CoreHandler
+from baserow.core.models import Workspace
 from baserow.core.registry import Instance
 from baserow.core.services.dispatch_context import DispatchContext
 from baserow.core.services.exceptions import (
     DoesNotExist,
     InvalidContextContentDispatchException,
+    PermissionDeniedDispatchException,
     ServiceImproperlyConfiguredDispatchException,
 )
 from baserow.core.services.registries import (
@@ -153,6 +156,54 @@ class LocalBaserowServiceType(ServiceType):
     """
 
     integration_type = LocalBaserowIntegrationType.type
+
+    def get_acting_user(
+        self, service: ServiceSubClass, dispatch_context: DispatchContext
+    ) -> AbstractUser:
+        """
+        Returns the user whose permissions and identity this dispatch runs under.
+
+        With an integration, that integration's `authorized_user` acts, as in the
+        builder, automation and dashboard. Without one, the dispatch context's
+        actor acts instead. This is the only place a Local Baserow service type
+        may resolve its user.
+
+        :param service: The service being dispatched.
+        :param dispatch_context: The context this dispatch runs in.
+        :raises ServiceImproperlyConfiguredDispatchException: When neither an
+            integration nor an actor supplies a user.
+        :return: The acting user.
+        """
+
+        if service.integration_id:
+            authorized_user = service.integration.specific.authorized_user
+            # Nullable, and an import leaves it null when the exported username
+            # is not in the target workspace. Refuse rather than let a `None`
+            # reach a permission check as anonymous.
+            if authorized_user is None:
+                raise ServiceImproperlyConfiguredDispatchException(
+                    "The integration has no authorized user"
+                )
+            return authorized_user
+
+        if dispatch_context.actor is None:
+            raise ServiceImproperlyConfiguredDispatchException(
+                "No integration selected"
+            )
+
+        return dispatch_context.actor
+
+    def requires_integration(self, service: ServiceSubClass) -> bool:
+        """
+        A Local Baserow service needs an integration only to supply a user, and a
+        dispatch source can supply one itself. `get_acting_user` refuses the
+        dispatch when neither is there.
+
+        :param service: The service in question.
+        :return: Whether an integration is required.
+        """
+
+        return False
 
     def get_schema_for_return_type(
         self, service: ServiceSubClass, properties: Dict[str, Any]
@@ -216,6 +267,23 @@ class LocalBaserowTableServiceType(LocalBaserowServiceType):
 
     class SerializedDict(ServiceDict):
         table_id: int
+
+    def get_permission_workspace(self, service: ServiceSubClass) -> Workspace:
+        """
+        Returns the workspace that permission checks for this service run against.
+
+        With an integration this is the integration's application workspace.
+        Without one there is no application, so the target table's workspace is
+        used instead.
+
+        :param service: The service being dispatched.
+        :return: The workspace to check permissions in.
+        """
+
+        if service.integration_id:
+            return service.integration.specific.application.workspace
+
+        return service.table.database.workspace
 
     def _convert_allowed_field_names(self, service, allowed_fields):
         """
@@ -293,10 +361,8 @@ class LocalBaserowTableServiceType(LocalBaserowServiceType):
         Build the queryset for this table, checking for the appropriate permissions.
         """
 
-        integration = service.integration.specific
-
         CoreHandler().check_permissions(
-            integration.authorized_user,
+            self.get_acting_user(service, dispatch_context),
             ListRowsDatabaseTableOperationType.type,
             workspace=table.database.workspace,
             context=table,
@@ -448,7 +514,13 @@ class LocalBaserowTableServiceType(LocalBaserowServiceType):
         """
 
         if prop_name == "table_id" and "database_tables" in id_mapping:
-            return id_mapping["database_tables"].get(value, None)
+            # A duplicate stays in the same workspace, so a table outside the
+            # duplicated scope is still the right target. An import can land in
+            # another workspace, where a kept id would reach a table the
+            # importer cannot see.
+            config = kwargs.get("import_export_config")
+            unmapped = value if getattr(config, "is_duplicate", False) else None
+            return id_mapping["database_tables"].get(value, unmapped)
 
         return super().deserialize_property(
             prop_name,
@@ -1906,6 +1978,31 @@ class LocalBaserowUpsertRowServiceType(
             service, prop_name, files_zip=files_zip, storage=storage, cache=cache
         )
 
+    def _import_field_mapping_field_id(
+        self, field_id: int, id_mapping: Dict[str, Any], is_duplicate: bool
+    ) -> Optional[int]:
+        """
+        The id a field mapping should point at once imported.
+
+        An unmapped field was trashed, or belongs to a table outside the copied
+        scope. A duplicate keeps such a table, so it keeps its fields too.
+
+        :param field_id: The field id the mapping was exported with.
+        :param id_mapping: The id mapping dict.
+        :param is_duplicate: Whether this import is a duplicate.
+        :return: The field id to point at, or None to drop the mapping.
+        """
+
+        if "database_fields" not in id_mapping:
+            return field_id
+
+        mapped_field_id = id_mapping["database_fields"].get(field_id)
+        if mapped_field_id is not None or not is_duplicate:
+            return mapped_field_id
+
+        # `objects` excludes trashed fields, so this tells the two apart.
+        return field_id if Field.objects.filter(id=field_id).exists() else None
+
     def deserialize_property(
         self,
         prop_name: str,
@@ -1926,15 +2023,13 @@ class LocalBaserowUpsertRowServiceType(
         """
 
         if prop_name == "field_mappings":
+            config = kwargs.get("import_export_config")
+            is_duplicate = getattr(config, "is_duplicate", False)
             return [
                 {
                     **item,
-                    "field_id": (
-                        # The `database_fields` exist, but the field ID
-                        # won't be present if it's trashed.
-                        id_mapping["database_fields"].get(item["field_id"])
-                        if "database_fields" in id_mapping
-                        else item["field_id"]
+                    "field_id": self._import_field_mapping_field_id(
+                        item["field_id"], id_mapping, is_duplicate
                     ),
                 }
                 for item in value
@@ -2059,15 +2154,26 @@ class LocalBaserowUpsertRowServiceType(
         table = service.table
         used_field_names = self.get_used_field_names(service, dispatch_context)
 
-        service.integration = service.integration.specific
+        acting_user = self.get_acting_user(service, dispatch_context)
+
         row_id: Optional[int] = resolved_values.get("row_id", None)
 
         row_values = {}
-        field_mappings = (
-            service.field_mappings.select_related("field")
-            .filter(enabled=True)
-            .exclude(field__trashed=True)
+        enabled_field_mappings = list(
+            service.field_mappings.select_related("field").filter(enabled=True)
         )
+        field_mappings = [fm for fm in enabled_field_mappings if not fm.field.trashed]
+
+        # Without an integration the service acts as the person in front of the
+        # screen, so a mapping left pointing at a trashed field fails the
+        # dispatch instead of being dropped, which would write the row without
+        # it (ADR 006 section 8). Raised before anything is written.
+        if len(field_mappings) != len(enabled_field_mappings) and (
+            service.integration_id is None
+        ):
+            raise ServiceImproperlyConfiguredDispatchException(
+                "This action writes to a field that no longer exists."
+            )
 
         # Track the field<->mapping relationship.
         context_map = {fm.field: fm for fm in field_mappings}
@@ -2076,25 +2182,37 @@ class LocalBaserowUpsertRowServiceType(
         permission_check_results = CoreHandler().check_multiple_permissions(
             [
                 PermissionCheck(
-                    service.integration.authorized_user,
+                    acting_user,
                     WriteFieldValuesOperationType.type,
                     fm.field,
                 )
                 for fm in field_mappings
             ],
-            workspace=service.integration.application.workspace,
+            workspace=self.get_permission_workspace(service),
         )
 
-        # Only iterate over field mappings which we know our authorized user is
-        # allowed to write values to. Writable doesn't refer to the field type being
-        # writable, but rather if the authorized user has the correct permission.
-        authorized_user_writable_field_mappings = [
-            context_map[check.context]
-            for check, check_result in permission_check_results.items()
-            if check_result
-        ]
+        # Writable doesn't refer to the field type being writable, but rather if
+        # the acting user has the correct permission.
+        writable_field_mappings = []
+        has_unwritable_fields = False
+        for check, check_result in permission_check_results.items():
+            if check_result:
+                writable_field_mappings.append(context_map[check.context])
+            else:
+                has_unwritable_fields = True
 
-        for field_mapping in authorized_user_writable_field_mappings:
+        # Without an integration the service acts as the person in front of the
+        # screen, so an unwritable field fails the dispatch instead of being
+        # skipped (ADR 006 section 5). Raised before anything is written.
+        if has_unwritable_fields and service.integration_id is None:
+            # The names are left out: this message reaches the clicker, who may
+            # have no access to the target table at all. Roles are not field
+            # scoped, so naming them would say nothing the table name doesn't.
+            raise PermissionDeniedDispatchException(
+                "You don't have permission to write to the fields this action changes."
+            )
+
+        for field_mapping in writable_field_mappings:
             if field_mapping.id not in resolved_values:
                 continue
 
@@ -2115,7 +2233,7 @@ class LocalBaserowUpsertRowServiceType(
             try:
                 # Automatically cast the resolved value to the serializer field type
                 cast_function = guess_cast_function_from_response_serializer_field(
-                    serializer_field, service
+                    serializer_field, acting_user
                 )
 
                 if cast_function:
@@ -2145,7 +2263,7 @@ class LocalBaserowUpsertRowServiceType(
         if row_id:
             try:
                 (row,) = UpdateRowsActionType.do(
-                    service.integration.authorized_user,
+                    acting_user,
                     table,
                     rows_values=[{**row_values, "id": row_id}],
                     model=model,
@@ -2161,7 +2279,7 @@ class LocalBaserowUpsertRowServiceType(
         else:
             try:
                 (row,) = CreateRowsActionType.do(
-                    user=service.integration.authorized_user,
+                    user=acting_user,
                     table=table,
                     rows_values=[row_values],
                     model=model,
@@ -2366,7 +2484,7 @@ class LocalBaserowUpsertRowsServiceType(LocalBaserowTableServiceType):
     ) -> Dict[str, Any]:
         table = service.table
         used_field_names = self.get_used_field_names(service, dispatch_context)
-        service.integration = service.integration.specific
+        acting_user = self.get_acting_user(service, dispatch_context)
 
         rows = resolved_values.get("rows", [])
         if not rows:
@@ -2383,7 +2501,7 @@ class LocalBaserowUpsertRowsServiceType(LocalBaserowTableServiceType):
             model, rows, include_id=self.include_id
         )
         self._raise_if_rows_values_are_invalid(model, rows_values)
-        rows = self.dispatch_rows(service, rows_values, model)
+        rows = self.dispatch_rows(service, rows_values, model, acting_user)
 
         return {
             "data": rows,
@@ -2396,6 +2514,7 @@ class LocalBaserowUpsertRowsServiceType(LocalBaserowTableServiceType):
         service: Union[LocalBaserowCreateRows, LocalBaserowUpdateRows],
         rows_values: List[Dict[str, Any]],
         model: Type["GeneratedTableModel"],
+        user: AbstractUser,
     ) -> List[Any]:
         raise NotImplementedError("Subclasses must implement dispatch_rows.")
 
@@ -2486,11 +2605,12 @@ class LocalBaserowCreateRowsServiceType(LocalBaserowUpsertRowsServiceType):
         service: LocalBaserowCreateRows,
         rows_values: List[Dict[str, Any]],
         model: Type["GeneratedTableModel"],
+        user: AbstractUser,
     ) -> List[Any]:
         table = service.table
         try:
             return CreateRowsActionType.do(
-                user=service.integration.authorized_user,
+                user=user,
                 table=table,
                 rows_values=rows_values,
                 model=model,
@@ -2523,11 +2643,12 @@ class LocalBaserowUpdateRowsServiceType(LocalBaserowUpsertRowsServiceType):
         service: LocalBaserowUpdateRows,
         rows_values: List[Dict[str, Any]],
         model: Type["GeneratedTableModel"],
+        user: AbstractUser,
     ) -> List[Any]:
         table = service.table
         try:
             return UpdateRowsActionType.do(
-                user=service.integration.authorized_user,
+                user=user,
                 table=table,
                 rows_values=rows_values,
                 model=model,
@@ -2641,9 +2762,9 @@ class LocalBaserowDeleteRowServiceType(
         """
 
         table = service.table
-        integration = service.integration.specific
         row_ids: List[int] = resolved_values.get("row_id", [])
         model = table.get_model()
+        acting_user = self.get_acting_user(service, dispatch_context)
 
         if row_ids:
             limit = settings.INTEGRATION_LOCAL_BASEROW_BATCH_OPERATION_SIZE_LIMIT
@@ -2658,7 +2779,10 @@ class LocalBaserowDeleteRowServiceType(
 
             try:
                 DeleteRowsActionType.do(
-                    integration.authorized_user, table, row_ids, model=model
+                    acting_user,
+                    table,
+                    row_ids,
+                    model=model,
                 )
             except RowDoesNotExist as exc:
                 raise DoesNotExist(f"Rows with ids {exc.ids} do not exist.") from exc

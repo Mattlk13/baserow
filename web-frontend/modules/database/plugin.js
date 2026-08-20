@@ -334,7 +334,10 @@ import {
   WebhookPayloadTooLargedNotificationType,
 } from '@baserow/modules/database/notificationTypes'
 import { HistoryRowModalSidebarType } from '@baserow/modules/database/rowModalSidebarTypes'
-import { FieldsDataProviderType } from '@baserow/modules/database/dataProviderTypes'
+import {
+  FieldsDataProviderType,
+  RowDataProviderType,
+} from '@baserow/modules/database/dataProviderTypes'
 
 import {
   DatabaseOnboardingType,
@@ -370,6 +373,12 @@ import {
   DatabaseRowSearchType,
 } from '@baserow/modules/database/searchTypes'
 import { searchTypeRegistry } from '@baserow/modules/core/search/types/registry'
+import {
+  OpenUrlWorkflowActionType,
+  LocalBaserowCreateRowWorkflowActionType,
+  LocalBaserowUpdateRowWorkflowActionType,
+  LocalBaserowDeleteRowWorkflowActionType,
+} from '@baserow/modules/database/workflowActionTypes'
 
 export default defineNuxtPlugin({
   name: 'database',
@@ -395,6 +404,7 @@ export default defineNuxtPlugin({
     $registry.registerNamespace('viewAggregation')
     $registry.registerNamespace('formViewMode')
     $registry.registerNamespace('databaseDataProvider')
+    $registry.registerNamespace('databaseWorkflowActionType')
     $registry.registerNamespace('rowModalSidebar')
     $registry.registerNamespace('onboardingTrackFields')
     $registry.registerNamespace('configureDataSync')
@@ -989,6 +999,7 @@ export default defineNuxtPlugin({
       'databaseDataProvider',
       new FieldsDataProviderType(context)
     )
+    $registry.register('databaseDataProvider', new RowDataProviderType(context))
 
     // notifications
     $registry.register(
@@ -1080,6 +1091,23 @@ export default defineNuxtPlugin({
     )
 
     $registry.register('guidedTour', new DatabaseGuidedTourType(context))
+
+    $registry.register(
+      'databaseWorkflowActionType',
+      new OpenUrlWorkflowActionType(context)
+    )
+    $registry.register(
+      'databaseWorkflowActionType',
+      new LocalBaserowCreateRowWorkflowActionType(context)
+    )
+    $registry.register(
+      'databaseWorkflowActionType',
+      new LocalBaserowUpdateRowWorkflowActionType(context)
+    )
+    $registry.register(
+      'databaseWorkflowActionType',
+      new LocalBaserowDeleteRowWorkflowActionType(context)
+    )
 
     $registry.registerNamespace('fieldContextItem')
 

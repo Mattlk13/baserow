@@ -65,7 +65,8 @@ _DEFAULT_PROFILE: dict[str, ModelSettings] = {
     },
     TITLE: {
         "temperature": 0.7,
-        "timeout": 10,
+        # Gemini rejects deadlines under 10s, so stay clear of the floor.
+        "timeout": 15,
         "max_tokens": AssistantChat.TITLE_MAX_LENGTH,
     },
     SUGGESTIONS: {
@@ -147,6 +148,11 @@ def get_model_settings(model: str, role: str) -> ModelSettings:
 # ---------------------------------------------------------------------------
 
 
+# Sub-agents pass the model string straight to pydantic-ai's infer_model, which
+# only accepts its own provider names.
+_PROVIDER_PREFIX_ALIASES = {"google-gla": "google", "google-vertex": "google-cloud"}
+
+
 def get_model_string(model: str | None = None) -> str:
     """
     Returns the model string for the pydantic-ai agent.
@@ -169,6 +175,11 @@ def get_model_string(model: str | None = None) -> str:
         # No provider prefix at all (e.g. "gpt-4o") — default to OpenAI
         # for backward compatibility with old UDSPY_LM_MODEL values.
         value = f"openai:{value}"
+
+    provider, sep, rest = value.partition(":")
+    if sep and provider in _PROVIDER_PREFIX_ALIASES:
+        value = f"{_PROVIDER_PREFIX_ALIASES[provider]}:{rest}"
+
     return value
 
 

@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
-from pydantic_ai._run_context import RunContext
+from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import (
@@ -197,6 +197,18 @@ _PROVIDER_ENV: dict[str, dict[str, str | None]] = {
     "ollama": {
         "base_url": "OLLAMA_BASE_URL",
     },
+    "google": {
+        "api_key": "GOOGLE_API_KEY",
+    },
+    "google-gla": {
+        "api_key": "GOOGLE_API_KEY",
+    },
+    "google-cloud": {
+        "api_key": "GOOGLE_API_KEY",
+    },
+    "google-vertex": {
+        "api_key": "GOOGLE_API_KEY",
+    },
 }
 
 
@@ -262,33 +274,34 @@ def _make_ollama(name: str, creds: dict[str, str | None]) -> Model:
 
 def _make_google(name: str, creds: dict[str, str | None]) -> Model:
     """Google models need a fresh httpx client per call to avoid event-loop
-    binding issues in Django async views.
+    binding issues in Django async views.  The client must come from
+    ``create_async_http_client``: a bare ``httpx.AsyncClient`` defaults to a 5s
+    timeout, which Google rejects as below its 10s minimum deadline.
     See: https://github.com/pydantic/pydantic-ai/issues/3240
     """
 
-    import httpx
+    from pydantic_ai.models import create_async_http_client
     from pydantic_ai.models.google import GoogleModel
     from pydantic_ai.providers.google import GoogleProvider
 
     return GoogleModel(
         name,
         provider=GoogleProvider(
-            api_key=creds["api_key"], http_client=httpx.AsyncClient()
+            api_key=creds["api_key"], http_client=create_async_http_client()
         ),
     )
 
 
 def _make_google_vertex(name: str, creds: dict[str, str | None]) -> Model:
-    import httpx
+    from pydantic_ai.models import create_async_http_client
     from pydantic_ai.models.google import GoogleModel
-    from pydantic_ai.providers.google import GoogleProvider
+    from pydantic_ai.providers.google_cloud import GoogleCloudProvider
 
     return GoogleModel(
         name,
-        provider=GoogleProvider(
+        provider=GoogleCloudProvider(
             api_key=creds["api_key"],
-            http_client=httpx.AsyncClient(),
-            vertexai=True,
+            http_client=create_async_http_client(),
         ),
     )
 
@@ -298,9 +311,11 @@ _PROVIDER_FACTORIES: dict[str, Callable[[str, dict[str, str | None]], Model]] = 
     "groq": _make_groq,
     "anthropic": _make_anthropic,
     "ollama": _make_ollama,
+    # Both spellings resolve here; get_model_string() normalises them for sub-agents.
     "google-gla": _make_google,
     "google": _make_google,
     "google-vertex": _make_google_vertex,
+    "google-cloud": _make_google_vertex,
 }
 
 
@@ -489,6 +504,8 @@ class _ErrorRecoveringStream(StreamedResponse):
     provider_response_id = property(lambda self: self._inner.provider_response_id)  # type: ignore[assignment]
     provider_details = property(lambda self: self._inner.provider_details)  # type: ignore[assignment]
     finish_reason = property(lambda self: self._inner.finish_reason)  # type: ignore[assignment]
+    state = property(lambda self: self._inner.state)  # type: ignore[assignment]
+    metadata = property(lambda self: self._inner.metadata)  # type: ignore[assignment]
     _cancelled = property(lambda self: self._inner._cancelled)  # type: ignore[assignment]
     _finished = property(lambda self: self._inner._finished)  # type: ignore[assignment]
     _parts_manager = property(lambda self: self._inner._parts_manager)  # type: ignore[assignment]
@@ -525,6 +542,10 @@ class _ErrorRecoveringStream(StreamedResponse):
                 yield self._parts_manager.handle_part(
                     vendor_part_id=f"recovered-{i}", part=part
                 )
+
+    async def close_stream(self) -> None:
+        # Not delegating leaves the base class's NotImplementedError in place.
+        await self._inner.close_stream()
 
     # Abstract properties — delegate to inner stream.
 

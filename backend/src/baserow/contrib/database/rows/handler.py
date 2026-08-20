@@ -1994,7 +1994,8 @@ class RowHandler:
         if signal_params is None:
             signal_params = {}
 
-        progress.increment(state=ROW_IMPORT_CREATION)
+        if progress:
+            progress.increment(state=ROW_IMPORT_CREATION)
 
         if model is None:
             model = table.get_model()
@@ -2076,10 +2077,12 @@ class RowHandler:
             workspace=workspace,
             context=table,
         )
+
+        configuration = configuration or {}
+
         model = table.get_model()
 
         error_report = RowErrorReport(data)
-        configuration = configuration or {}
         update_handler = UpsertRowsMappingHandler(
             table=table,
             upsert_fields=configuration.get("upsert_fields") or [],
@@ -2198,6 +2201,14 @@ class RowHandler:
                     rows_values_to_create.append(row)
         else:
             rows_values_to_create = valid_rows
+
+        if rows_values_to_update:
+            CoreHandler().check_permissions(
+                user,
+                UpdateDatabaseRowOperationType.type,
+                workspace=workspace,
+                context=table,
+            )
 
         changed_rows = len(rows_values_to_create) + len(rows_values_to_update)
         full_field_search_update = self._should_use_full_field_search_update_for_import(

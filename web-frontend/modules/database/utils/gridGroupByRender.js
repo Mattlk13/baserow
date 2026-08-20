@@ -179,6 +179,7 @@ export function buildLayout({
         type: 'rowSection',
         depth: node.depth,
         path: node.path,
+        display: node.display,
         rowCount,
         y,
         height: sectionHeight,
@@ -191,6 +192,8 @@ export function buildLayout({
         type: 'addRow',
         depth: node.depth,
         path: node.path,
+        display: node.display,
+        rowCount,
         y,
         height: ADD_ROW_HEIGHT,
       })
@@ -399,6 +402,7 @@ function buildPagedLayout({
             type: 'rowSection',
             depth: node.depth ?? depth,
             path: node.path,
+            display: node.display,
             rowCount,
             y,
             height: sectionHeight,
@@ -411,6 +415,8 @@ function buildPagedLayout({
             type: 'addRow',
             depth: node.depth ?? depth,
             path: node.path,
+            display: node.display,
+            rowCount,
             y,
             height: ADD_ROW_HEIGHT,
           })
@@ -707,4 +713,86 @@ export function renderViewport({
   }
 
   return items
+}
+
+/**
+ * Resolves a pointer position in grouped layout-space to a visible row insertion
+ * slot. Group headers, gaps, unloaded row slots, and collapsed groups are not valid
+ * targets. The returned `before` row is null for the explicit end-of-group slot.
+ */
+export function resolveGroupByRowMoveTarget({
+  layout,
+  sectionRows,
+  contentY,
+  fields,
+  sourcePath,
+  allowCrossGroup,
+  rowHeight = ROW_HEIGHT,
+}) {
+  if (!sourcePath) {
+    return null
+  }
+  const sourceSectionKey = pathKey(sourcePath, fields)
+
+  for (const item of layout.items) {
+    if (contentY < item.y || contentY >= item.y + item.height) {
+      continue
+    }
+
+    if (item.type !== 'rowSection' && item.type !== 'addRow') {
+      return null
+    }
+
+    // A root add-row line in an empty grouped view has only a partial path and
+    // therefore cannot identify a destination leaf group.
+    const completePath = fields.every(
+      (field) => `field_${field.id}` in item.path
+    )
+    if (!completePath) {
+      return null
+    }
+
+    const sectionKey = pathKey(item.path, fields)
+    if (!allowCrossGroup && sectionKey !== sourceSectionKey) {
+      return null
+    }
+
+    const { rowCount } = item
+    const rows = sectionRows.get(sectionKey)
+    if (item.type === 'rowSection') {
+      const hoveredPosition = Math.min(
+        rowCount - 1,
+        Math.floor((contentY - item.y) / rowHeight)
+      )
+      if (rows?.get(hoveredPosition) === undefined) {
+        return null
+      }
+    }
+
+    const position =
+      item.type === 'addRow'
+        ? rowCount
+        : Math.max(
+            0,
+            Math.min(rowCount, Math.round((contentY - item.y) / rowHeight))
+          )
+    const before = position === rowCount ? null : rows?.get(position)
+
+    // A sparse/unloaded row slot cannot provide the row id needed by the move API.
+    if (position < rowCount && before === undefined) {
+      return null
+    }
+
+    return {
+      before,
+      path: item.path,
+      display: item.display ?? null,
+      sectionKey,
+      position,
+      // The add-row line already sits at the end-of-group slot.
+      y: item.type === 'addRow' ? item.y : item.y + position * rowHeight,
+    }
+  }
+
+  return null
 }

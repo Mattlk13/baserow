@@ -61,6 +61,8 @@ import {
   getGroupByRowInsertLocation,
   getMissingGroupBySectionRanges,
   groupDisplayFromRow,
+  canMoveRowsAcrossGroupByFields,
+  hasWritableGroupByPathChange,
   groupPathDefaults,
   groupPathFromRow,
   isGroupByDataPageLoaded,
@@ -4729,10 +4731,68 @@ export const actions = {
    */
   async moveRow(
     { commit, dispatch, getters },
-    { table, grid, fields, getScrollTop, row, before = null }
+    {
+      table,
+      grid,
+      fields,
+      getScrollTop,
+      row,
+      before = null,
+      sourceGroupPath = null,
+      targetGroupPath = null,
+      targetGroupDisplay = null,
+    }
   ) {
     const { $registry, $client, $i18n, $config } = this
     const oldOrder = row.order
+    const groupByFields = getGroupByFieldsFromActiveGroupBys(
+      getters.getActiveGroupBys,
+      fields
+    )
+    const resolvedSourceGroupPath =
+      sourceGroupPath ||
+      (groupByFields.length > 0
+        ? groupPathFromRow(row, groupByFields, $registry)
+        : null)
+    const crossesGroup =
+      targetGroupPath !== null &&
+      resolvedSourceGroupPath !== null &&
+      pathKey(targetGroupPath, groupByFields) !==
+        pathKey(resolvedSourceGroupPath, groupByFields)
+
+    // This is also enforced by the drag target resolver. Keep the store action
+    // defensive because a cross-group move must never partially update a path that
+    // contains a read-only field.
+    if (
+      crossesGroup &&
+      !canMoveRowsAcrossGroupByFields(groupByFields, $registry)
+    ) {
+      return
+    }
+
+    const destinationGroupValues = crossesGroup
+      ? groupPathDefaults(
+          targetGroupPath,
+          groupByFields,
+          $registry,
+          targetGroupDisplay
+        )
+      : {}
+    const destinationGroupRequestValues = {}
+    for (const field of groupByFields) {
+      const fieldKey = `field_${field.id}`
+      if (!(fieldKey in destinationGroupValues)) {
+        continue
+      }
+      const fieldType = $registry.get('field', field.type)
+      destinationGroupRequestValues[fieldKey] = fieldType.prepareValueForUpdate(
+        field,
+        destinationGroupValues[fieldKey]
+      )
+    }
+    const undoRedoActionGroupId = crossesGroup
+      ? createNewUndoRedoActionGroupId()
+      : null
 
     // If before is not provided, then the row is added last. Because we don't know
     // the total amount of rows in the table, we are going to add find the highest
@@ -4757,6 +4817,12 @@ export const actions = {
     const optimisticFieldValues = {}
     const valuesBeforeOptimisticUpdate = {}
 
+    Object.keys(destinationGroupValues).forEach((fieldKey) => {
+      if (!_.isEqual(row[fieldKey], destinationGroupValues[fieldKey])) {
+        valuesBeforeOptimisticUpdate[fieldKey] = row[fieldKey]
+      }
+    })
+
     fieldsToCallOnRowMove.forEach((field) => {
       const fieldType = $registry.get('field', field._.type.type)
       const fieldID = `field_${field.id}`
@@ -4774,42 +4840,96 @@ export const actions = {
       }
     })
 
-    dispatch('updatedExistingRow', {
+    await dispatch('updatedExistingRow', {
       view: grid,
       fields,
       row,
-      values: { order, ...optimisticFieldValues },
+      values: {
+        order,
+        ...optimisticFieldValues,
+        ...destinationGroupValues,
+      },
+      markGroupAggregationsLoading: crossesGroup,
+      forceGroupByRowMove: crossesGroup,
     })
 
+    let groupUpdateCompleted = false
+    let groupUpdateResponseData = null
+    let moveResponseData
+
     try {
+      if (crossesGroup) {
+        // Keep value updates and ordering as separate API operations. They share an
+        // action group for undo/redo, but a successful update intentionally remains
+        // applied if the following move fails.
+        const { data } = await RowService($client).update(
+          table.id,
+          row.id,
+          destinationGroupRequestValues,
+          grid.id,
+          undoRedoActionGroupId
+        )
+        groupUpdateCompleted = true
+        groupUpdateResponseData = data
+      }
+
       const { data } = await RowService($client).move(
         table.id,
         row.id,
-        before !== null ? before.id : null
+        before !== null ? before.id : null,
+        grid.id,
+        undoRedoActionGroupId
       )
-      // Use the return value to update the moved row with values from
-      // the backend
-      commit('UPDATE_ROW_IN_BUFFER', { row, values: data })
-      if (before === null) {
-        // Not having a before means that the row was moved to the end and because
-        // that order was just an estimation, we want to update it with the real
-        // order, otherwise there could be order conflicts in the future.
-        commit('UPDATE_ROW_IN_BUFFER', { row, values: { order: data.order } })
-      }
-      dispatch('fetchByScrollTopDelayed', {
-        scrollTop: getScrollTop(),
-        fields,
-      })
-      dispatch('fetchAllFieldAggregationData', { view: grid })
+      moveResponseData = data
     } catch (error) {
-      dispatch('updatedExistingRow', {
+      const values = groupUpdateCompleted
+        ? { ...groupUpdateResponseData, order: oldOrder }
+        : { order: oldOrder, ...valuesBeforeOptimisticUpdate }
+      await dispatch('updatedExistingRow', {
         view: grid,
         fields,
         row,
-        values: { order: oldOrder, ...valuesBeforeOptimisticUpdate },
+        values,
+        markGroupAggregationsLoading: crossesGroup,
+        forceGroupByRowMove: crossesGroup,
       })
+      if (crossesGroup) {
+        if (groupUpdateCompleted) {
+          dispatch('fetchByScrollTopDelayed', {
+            scrollTop: getScrollTop(),
+            fields,
+          })
+          dispatch('fetchAllFieldAggregationData', {
+            view: grid,
+            clearGroupByAggregationLoadingPaths: true,
+          })
+        } else {
+          commit('SET_GROUP_BY_AGGREGATIONS_LOADING_PATHS', [])
+        }
+      }
       throw error
     }
+
+    // Use the return value to update the moved row with values from
+    // the backend
+    commit('UPDATE_ROW_IN_BUFFER', { row, values: moveResponseData })
+    if (before === null) {
+      // Not having a before means that the row was moved to the end and because
+      // that order was just an estimation, we want to update it with the real
+      // order, otherwise there could be order conflicts in the future.
+      commit('UPDATE_ROW_IN_BUFFER', {
+        row,
+        values: { order: moveResponseData.order },
+      })
+    }
+    dispatch('fetchByScrollTopDelayed', {
+      scrollTop: getScrollTop(),
+      fields,
+    })
+    dispatch('fetchAllFieldAggregationData', {
+      view: grid,
+      clearGroupByAggregationLoadingPaths: crossesGroup,
+    })
   },
   /**
    * Updates a grid view field value. It will immediately be updated in the store
@@ -4911,8 +5031,59 @@ export const actions = {
               row,
               values: { ...values },
             })
+            const groupByFields = getGroupByFieldsFromActiveGroupBys(
+              getters.getActiveGroupBys,
+              fields
+            )
+            let groupChanged = false
+            if (getters.isGroupByMode && groupByFields.length > 0) {
+              const rowInStore = getters.getRow(row.id)
+              const occupiedPath = getGroupByRowTreePath(
+                state,
+                getters,
+                rowInStore,
+                groupByFields,
+                $registry
+              )
+              const valuePath = groupPathFromRow(
+                rowInStore,
+                groupByFields,
+                $registry
+              )
+              const hasWritablePathChange = hasWritableGroupByPathChange(
+                occupiedPath,
+                valuePath,
+                groupByFields,
+                $registry
+              )
+
+              // A read-only group change has no editable draft to preserve. Move
+              // before recomputing flags so the selected row does not retain a
+              // stale move warning in the group it no longer belongs to.
+              if (!hasWritablePathChange) {
+                groupChanged = moveGroupByRowToValueGroup(
+                  { commit, getters, state },
+                  {
+                    row: rowInStore,
+                    view,
+                    fields,
+                    registry: $registry,
+                    onlyIfGroupChanged: true,
+                  }
+                )
+              }
+            }
             if (optimisticUpdate) {
               await dispatch('onRowChange', { view, row, fields })
+            }
+            if (groupChanged) {
+              dispatch('correctMultiSelect')
+              if (hasConfiguredGroupAggregation(getters.getAllFieldOptions)) {
+                dispatch('fetchAllFieldAggregationData', {
+                  view,
+                  clearGroupByAggregationLoadingPaths: true,
+                })
+              }
             }
           }
         } else {
@@ -5356,6 +5527,7 @@ export const actions = {
       metadata,
       updatedFieldIds = [],
       markGroupAggregationsLoading = false,
+      forceGroupByRowMove = false,
     }
   ) {
     const { $registry } = this
@@ -5423,6 +5595,13 @@ export const actions = {
     const keepSelectedGroupByRowInPlace =
       getters.isGroupByMode &&
       groupByPathChanged &&
+      !forceGroupByRowMove &&
+      hasWritableGroupByPathChange(
+        oldGroupByPath,
+        newGroupByPath,
+        groupByFields,
+        $registry
+      ) &&
       isRowSelected(getters.getRow(newRow.id))
     const getFieldId = (key) => parseInt(key.split('_')[1])
     const clearPendingFieldOperations = () => {
@@ -6625,6 +6804,26 @@ export const getters = {
       fields: groupByFields,
       rowHeight: state.rowHeight,
     })
+  },
+  getGroupByRowLocation: (state) => (rowId) => {
+    return state.groupBy.rowLocations[rowId] || null
+  },
+  getGroupByRowPath: (state, getters) => (rowId, fields) => {
+    const location = state.groupBy.rowLocations[rowId]
+    if (!location) {
+      return null
+    }
+    const groupByFields = getGroupByFieldsFromActiveGroupBys(
+      state.activeGroupBys,
+      fields
+    )
+    return (
+      findGroupByRowSection(
+        getters.getGroupByLayout,
+        location.sectionKey,
+        groupByFields
+      )?.path || null
+    )
   },
   /**
    * The vertical pixel range a row occupies in the group-by layout, so the view can

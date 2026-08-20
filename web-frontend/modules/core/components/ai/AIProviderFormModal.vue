@@ -88,7 +88,6 @@
         />
         <Button
           type="secondary"
-          size="small"
           icon="iconoir-cancel"
           :title="$t('aiProviderAdmin.removeModel')"
           :aria-label="$t('aiProviderAdmin.removeModel')"
@@ -130,6 +129,7 @@ export default {
   props: {
     provider: { type: Object, default: null },
     providerTypes: { type: Array, required: true },
+    workspaceId: { type: Number, default: null },
   },
   emits: ['hidden', 'saved'],
   data() {
@@ -238,7 +238,12 @@ export default {
       try {
         const result = await this.$store.dispatch(
           'aiProvider/discoverModels',
-          this.values.provider_type
+          this.workspaceId === null
+            ? this.values.provider_type
+            : {
+                providerType: this.values.provider_type,
+                workspaceId: this.workspaceId,
+              }
         )
         this.discoveredModels = result.models || []
         this.discoverySupported = result.supported !== false
@@ -285,8 +290,16 @@ export default {
       try {
         const action = this.provider ? 'aiProvider/update' : 'aiProvider/create'
         const payload = this.provider
-          ? { providerId: this.provider.id, values }
-          : values
+          ? {
+              providerId: this.provider.id,
+              values,
+              ...(this.workspaceId === null
+                ? {}
+                : { workspaceId: this.workspaceId }),
+            }
+          : this.workspaceId === null
+            ? values
+            : { values, workspaceId: this.workspaceId }
         const result = await this.$store.dispatch(action, payload)
         this.$emit('saved', result)
         this.hide()

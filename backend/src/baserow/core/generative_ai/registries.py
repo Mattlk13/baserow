@@ -4,10 +4,21 @@ import os
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, Optional, get_args, get_origin
 
+from django.db.models import Q
+
 from loguru import logger
 
-from baserow.core.ai_provider.constants import AI_PROVIDER_CONFIGS_LOCAL_CACHE_KEY
+from baserow.core.ai_provider.constants import (
+    AI_PROVIDER_CONFIGS_LOCAL_CACHE_KEY,
+    PROVIDER_ENVIRONMENT_SETTINGS,
+)
+from baserow.core.ai_provider.exceptions import InvalidAIProviderSettings
+from baserow.core.ai_provider.models import (
+    AIProviderConfig,
+    AIProviderWorkspaceOverride,
+)
 from baserow.core.cache import local_cache
+from baserow.core.feature_flags import FF_AI_PROVIDERS, feature_flag_is_enabled
 from baserow.core.models import Workspace
 from baserow.core.registry import Instance, Registry
 
@@ -390,55 +401,253 @@ class GenerativeAIModelType(Instance):
         """
         Resolve a non-environment setting and report whether it is authoritative.
 
-        Legacy override and workspace values retain their current truthy fallback
-        semantics, except that model lists are always limited to models enabled by
-        the instance provider while the feature is enabled. Once an instance database
-        provider exists, its value is authoritative even when empty, preventing
-        disabled or cleared configuration from silently falling through to
-        environment variables.
+        Explicit overrides come first. With database providers enabled, workspace
+        models override matching instance models while non-overridden instance
+        models remain inherited. Otherwise a complete legacy workspace JSON
+        configuration is checked before an inherited instance provider and
+        environment settings. Incomplete legacy settings are never combined with
+        credentials from another scope.
         """
 
-        legacy_value = self.get_workspace_setting(workspace, key, settings_override)
+        providers_enabled = feature_flag_is_enabled(FF_AI_PROVIDERS)
+        model_settings_override = None
+        if settings_override is not None and key in settings_override:
+            if not providers_enabled or key != "models":
+                return True, settings_override[key]
+            complete_override = self._get_complete_provider_settings(settings_override)
+            if complete_override is not None:
+                return True, complete_override["models"]
+            model_settings_override = settings_override[key]
 
-        from baserow.core.feature_flags import FF_AI_PROVIDERS, feature_flag_is_enabled
+        if not providers_enabled:
+            legacy_value = self.get_workspace_setting(workspace, key)
+            if legacy_value:
+                return True, legacy_value
+            return False, None
 
-        if not feature_flag_is_enabled(FF_AI_PROVIDERS):
-            return (True, legacy_value) if legacy_value else (False, None)
-
-        if key != "models" and legacy_value:
-            return True, legacy_value
-
-        from baserow.core.ai_provider.models import AIProviderConfig
-
-        providers_by_type = local_cache.get(
-            AI_PROVIDER_CONFIGS_LOCAL_CACHE_KEY,
-            lambda: {
-                provider.provider_type: provider
-                for provider in AIProviderConfig.objects.prefetch_related("models")
-            },
+        workspace_providers, instance_providers, disabled_provider_ids = (
+            self._get_database_provider_configuration(workspace)
         )
-        provider = providers_by_type.get(self.type)
-        if provider is None:
-            return (True, legacy_value) if legacy_value else (False, None)
 
-        if not provider.is_active:
-            return True, [] if key == "models" else None
+        workspace_provider = workspace_providers.get(self.type)
+        legacy_settings = None
+        if workspace_provider is None and model_settings_override is None:
+            legacy_settings = self._get_complete_legacy_workspace_settings(workspace)
+            if legacy_settings is not None and key != "models":
+                return True, legacy_settings.get(key)
+        instance_provider = instance_providers.get(self.type)
+        if workspace_provider is None and instance_provider is None:
+            if model_settings_override is not None:
+                return True, model_settings_override
+            if legacy_settings is not None:
+                return True, legacy_settings.get(key)
+            return False, None
 
         if key == "models":
-            enabled_models = [
+            workspace_models = []
+            overridden_identifiers = set()
+            if workspace_provider is not None and workspace_provider.is_active:
+                workspace_model_rows = list(workspace_provider.models.all())
+                overridden_identifiers = {
+                    model.model_identifier for model in workspace_model_rows
+                }
+                workspace_models = [
+                    model.model_identifier
+                    for model in workspace_model_rows
+                    if model.is_enabled
+                ]
+
+            instance_models = []
+            if (
+                instance_provider is not None
+                and instance_provider.is_active
+                and instance_provider.id not in disabled_provider_ids
+            ):
+                instance_models = [
+                    model.model_identifier
+                    for model in instance_provider.models.all()
+                    if model.is_enabled
+                    and model.model_identifier not in overridden_identifiers
+                ]
+            effective_models = workspace_models + instance_models
+            models_to_limit = model_settings_override
+            if models_to_limit is None and legacy_settings is not None:
+                models_to_limit = legacy_settings["models"]
+            if models_to_limit is not None:
+                effective_model_set = set(effective_models)
+                effective_models = [
+                    model for model in models_to_limit if model in effective_model_set
+                ]
+            return True, effective_models
+
+        provider = None
+        if workspace_provider is not None and workspace_provider.is_active:
+            provider = workspace_provider
+        elif (
+            instance_provider is not None
+            and instance_provider.is_active
+            and instance_provider.id not in disabled_provider_ids
+        ):
+            provider = instance_provider
+        if provider is None:
+            return True, None
+        return True, self._get_provider_setting(provider, key)
+
+    def _get_database_provider_configuration(
+        self, workspace: Optional[Workspace]
+    ) -> tuple[dict[str, Any], dict[str, Any], set[int]]:
+        workspace_id = workspace.id if isinstance(workspace, Workspace) else None
+
+        def load_provider_configuration():
+            providers = AIProviderConfig.objects.prefetch_related("models")
+            if workspace_id is not None:
+                providers = providers.filter(
+                    Q(workspace_id=workspace_id) | Q(workspace__isnull=True)
+                )
+            else:
+                providers = providers.filter(workspace__isnull=True)
+            providers = list(providers)
+            instance_providers = {
+                provider.provider_type: provider
+                for provider in providers
+                if provider.workspace_id is None
+            }
+            if workspace_id is None:
+                return {}, instance_providers, set()
+            workspace_providers = {
+                provider.provider_type: provider
+                for provider in providers
+                if provider.workspace_id == workspace_id
+            }
+            disabled_instance_provider_ids = set(
+                AIProviderWorkspaceOverride.objects.filter(
+                    workspace_id=workspace_id
+                ).values_list("provider_config_id", flat=True)
+            )
+            return (
+                workspace_providers,
+                instance_providers,
+                disabled_instance_provider_ids,
+            )
+
+        cache_key = (
+            f"{AI_PROVIDER_CONFIGS_LOCAL_CACHE_KEY}:{workspace_id or 'instance'}"
+        )
+        return local_cache.get(cache_key, load_provider_configuration)
+
+    @staticmethod
+    def _get_provider_setting(provider: Any, key: str) -> Any:
+        if key == "api_key":
+            return provider.api_key
+        return provider.extra_settings.get(key)
+
+    def _get_provider_settings(self, provider: Any) -> dict[str, Any]:
+        extra_setting_names = PROVIDER_ENVIRONMENT_SETTINGS[self.type]["extra_settings"]
+        return {
+            "api_key": provider.api_key,
+            "models": [
                 model.model_identifier
                 for model in provider.models.all()
                 if model.is_enabled
-            ]
-            if legacy_value:
-                enabled_model_set = set(enabled_models)
-                enabled_models = [
-                    model for model in legacy_value if model in enabled_model_set
+            ],
+            **{name: provider.extra_settings.get(name) for name in extra_setting_names},
+        }
+
+    def _get_complete_legacy_workspace_settings(
+        self, workspace: Optional[Workspace]
+    ) -> Optional[dict[str, Any]]:
+        """Return legacy settings only when they define their own connection."""
+
+        if not isinstance(workspace, Workspace):
+            return None
+
+        values = (workspace.generative_ai_models_settings or {}).get(self.type)
+        return self._get_complete_provider_settings(values)
+
+    def _get_complete_provider_settings(self, values: Any) -> Optional[dict[str, Any]]:
+        """Validate and normalize one complete provider settings dictionary."""
+
+        from baserow.core.ai_provider.provider_types import (
+            get_legacy_workspace_provider_values,
+        )
+
+        try:
+            provider_values = get_legacy_workspace_provider_values(self.type, values)
+        except InvalidAIProviderSettings:
+            return None
+
+        return {
+            "api_key": provider_values["api_key"],
+            "models": provider_values["models"],
+            **provider_values["extra_settings"],
+        }
+
+    def get_model_settings_override(
+        self,
+        model_name: str,
+        workspace: Optional[Workspace] = None,
+        settings_override: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Resolve the complete provider configuration owning ``model_name``."""
+
+        if settings_override is not None:
+            return settings_override
+
+        if not feature_flag_is_enabled(FF_AI_PROVIDERS) or not isinstance(
+            workspace, Workspace
+        ):
+            return None
+
+        workspace_providers, instance_providers, disabled_provider_ids = (
+            self._get_database_provider_configuration(workspace)
+        )
+        workspace_provider = workspace_providers.get(self.type)
+        if workspace_provider is not None and workspace_provider.is_active:
+            if any(
+                model.model_identifier == model_name
+                for model in workspace_provider.models.all()
+            ):
+                return self._get_provider_settings(workspace_provider)
+
+        if workspace_provider is None:
+            legacy_settings = self._get_complete_legacy_workspace_settings(workspace)
+            if legacy_settings is not None:
+                instance_provider = instance_providers.get(self.type)
+                if instance_provider is None:
+                    return (
+                        legacy_settings
+                        if model_name in legacy_settings["models"]
+                        else None
+                    )
+                enabled_instance_models = [
+                    model.model_identifier
+                    for model in instance_provider.models.all()
+                    if instance_provider.is_active
+                    and instance_provider.id not in disabled_provider_ids
+                    and model.is_enabled
                 ]
-            return True, enabled_models
-        if key == "api_key":
-            return True, provider.api_key
-        return True, provider.extra_settings.get(key)
+                enabled_instance_model_set = set(enabled_instance_models)
+                enabled_legacy_models = [
+                    model
+                    for model in legacy_settings["models"]
+                    if model in enabled_instance_model_set
+                ]
+                if model_name not in enabled_legacy_models:
+                    return None
+                return {**legacy_settings, "models": enabled_legacy_models}
+
+        instance_provider = instance_providers.get(self.type)
+        if (
+            instance_provider is not None
+            and instance_provider.is_active
+            and instance_provider.id not in disabled_provider_ids
+            and any(
+                model.model_identifier == model_name and model.is_enabled
+                for model in instance_provider.models.all()
+            )
+        ):
+            return self._get_provider_settings(instance_provider)
+        return None
 
     def get_api_key(
         self,
@@ -660,6 +869,9 @@ class GenerativeAIModelType(Instance):
         from .exceptions import GenerativeAIPromptError
 
         try:
+            settings_override = self.get_model_settings_override(
+                model, workspace, settings_override
+            )
             ai_model = self.get_ai_model(model, workspace, settings_override)
             model_settings = {
                 **self._prepare_model_settings(temperature),
@@ -718,6 +930,57 @@ class GenerativeAIModelTypeRegistry(Registry):
             for key, model_type in self.registry.items()
             if model_type.is_enabled(workspace)
         }
+
+    def prefetch_workspace_configuration(self, workspace_ids: list[int]) -> None:
+        """
+        Load the provider configuration of many workspaces in one go.
+
+        Resolving enabled models per workspace is otherwise a query per
+        workspace, which is paid on every workspace list serialization.
+        """
+
+        if not feature_flag_is_enabled(FF_AI_PROVIDERS):
+            return
+
+        workspace_ids = {
+            workspace_id for workspace_id in workspace_ids if workspace_id is not None
+        }
+        if not workspace_ids:
+            return
+
+        providers = list(
+            AIProviderConfig.objects.filter(
+                Q(workspace_id__in=workspace_ids) | Q(workspace__isnull=True)
+            ).prefetch_related("models")
+        )
+        instance_providers = {
+            provider.provider_type: provider
+            for provider in providers
+            if provider.workspace_id is None
+        }
+        owned: dict[int, dict[str, Any]] = {
+            workspace_id: {} for workspace_id in workspace_ids
+        }
+        for provider in providers:
+            if provider.workspace_id is not None:
+                owned[provider.workspace_id][provider.provider_type] = provider
+
+        disabled: dict[int, set[int]] = {
+            workspace_id: set() for workspace_id in workspace_ids
+        }
+        for (
+            workspace_id,
+            provider_config_id,
+        ) in AIProviderWorkspaceOverride.objects.filter(
+            workspace_id__in=workspace_ids
+        ).values_list("workspace_id", "provider_config_id"):
+            disabled[workspace_id].add(provider_config_id)
+
+        for workspace_id in workspace_ids:
+            local_cache.get(
+                f"{AI_PROVIDER_CONFIGS_LOCAL_CACHE_KEY}:{workspace_id}",
+                (owned[workspace_id], instance_providers, disabled[workspace_id]),
+            )
 
 
 generative_ai_model_type_registry: GenerativeAIModelTypeRegistry = (

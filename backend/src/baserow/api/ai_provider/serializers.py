@@ -37,6 +37,20 @@ class AIProviderConfigSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class WorkspaceAIProviderConfigSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    provider_type = serializers.CharField(read_only=True)
+    extra_settings = serializers.DictField(read_only=True)
+    is_active = serializers.BooleanField(read_only=True)
+    models = AIProviderModelSerializer(many=True, read_only=True)
+    workspace_enabled = serializers.BooleanField(read_only=True)
+    read_only = serializers.BooleanField(read_only=True)
+
+
+class AIProviderScopeRequestSerializer(serializers.Serializer):
+    workspace_id = serializers.IntegerField(min_value=1, required=False)
+
+
 class AIProviderModelWriteSerializer(serializers.Serializer):
     model_identifier = serializers.CharField(max_length=255)
     is_enabled = serializers.BooleanField(required=False, default=True)
@@ -52,7 +66,7 @@ class AIProviderModelDiscoverySerializer(serializers.Serializer):
     supported = serializers.BooleanField()
 
 
-class AIProviderModelDiscoveryRequestSerializer(serializers.Serializer):
+class AIProviderModelDiscoveryRequestSerializer(AIProviderScopeRequestSerializer):
     provider_type = serializers.CharField(max_length=32)
 
 

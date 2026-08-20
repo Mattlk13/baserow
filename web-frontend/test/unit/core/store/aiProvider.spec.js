@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import {
   actions,
+  getters,
   mutations,
   state as makeState,
 } from '@baserow/modules/core/store/aiProvider'
@@ -15,12 +16,14 @@ describe('AI provider store', () => {
   let service
 
   beforeEach(() => {
+    vi.clearAllMocks()
     service = {
       fetchAll: vi.fn().mockResolvedValue({ data: [{ id: 1 }] }),
       fetchTypes: vi.fn().mockResolvedValue({ data: [{ type: 'openai' }] }),
       discoverModels: vi.fn().mockResolvedValue({
         data: { models: ['gpt-5.6'], supported: true },
       }),
+      create: vi.fn().mockResolvedValue({ data: { id: 1 } }),
       update: vi.fn().mockResolvedValue({ data: { id: 1, is_active: false } }),
       updateModel: vi.fn().mockResolvedValue({ data: { id: 2 } }),
       testModels: vi.fn().mockResolvedValue({
@@ -43,7 +46,10 @@ describe('AI provider store', () => {
     const committed = []
     await actions.fetchInitial.call(
       { $client: {} },
-      { commit: (type, payload) => committed.push([type, payload]) }
+      {
+        commit: (type, payload) => committed.push([type, payload]),
+        state: makeState(),
+      }
     )
 
     expect(service.fetchAll).toHaveBeenCalledOnce()
@@ -56,22 +62,207 @@ describe('AI provider store', () => {
     expect(committed.at(-1)).toEqual(['SET_LOADING', false])
   })
 
+  test('fetchInitial claims the new scope before it awaits', async () => {
+    const committed = []
+    const storeState = makeState()
+    storeState.workspaceId = null
+    storeState.loaded = true
+    storeState.providers = [{ id: 99 }]
+
+    await actions.fetchInitial.call(
+      { $client: {} },
+      {
+        commit: (type, payload) => committed.push([type, payload]),
+        state: storeState,
+      },
+      { workspaceId: 42 }
+    )
+
+    const keys = committed.map(([type]) => type)
+    // Claimed before the request resolves, or a refresh reloads the old scope.
+    expect(keys.indexOf('SET_WORKSPACE_ID')).toBeLessThan(
+      keys.lastIndexOf('SET_PROVIDERS')
+    )
+    expect(committed[0]).toEqual(['SET_WORKSPACE_ID', 42])
+    expect(committed[1]).toEqual(['SET_PROVIDERS', []])
+    expect(committed).toContainEqual(['SET_LOADED', false])
+  })
+
+  test('a slow fetch for an abandoned scope never commits', async () => {
+    const storeState = makeState()
+    let resolveSlow
+    service.fetchAll.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSlow = resolve
+      })
+    )
+    const commit = (type, payload) => {
+      if (type === 'SET_WORKSPACE_ID') storeState.workspaceId = payload
+      committed.push([type, payload])
+    }
+    const committed = []
+
+    const stale = actions.fetchInitial.call(
+      { $client: {} },
+      { commit, state: storeState },
+      { workspaceId: 1 }
+    )
+    // The user switches to another workspace before the first request lands.
+    storeState.workspaceId = 2
+    resolveSlow({ data: [{ id: 1 }] })
+    await stale
+
+    expect(
+      committed.filter(([type]) => type === 'SET_PROVIDERS').at(-1)
+    ).toEqual(['SET_PROVIDERS', []])
+    expect(committed).not.toContainEqual(['SET_LOADED', true])
+    expect(committed.filter(([type]) => type === 'SET_LOADING')).toEqual([
+      ['SET_LOADING', true],
+    ])
+  })
+
+  test('refresh does nothing until a scope has been loaded', async () => {
+    const commit = vi.fn()
+    const storeState = makeState()
+
+    const providers = await actions.refresh.call(
+      { $client: {} },
+      { commit, state: storeState }
+    )
+
+    expect(service.fetchAll).not.toHaveBeenCalled()
+    expect(commit).not.toHaveBeenCalled()
+    expect(providers).toEqual([])
+  })
+
+  test('getters only serve the scope the store was fetched for', () => {
+    const storeState = makeState()
+    storeState.workspaceId = 42
+    storeState.loaded = true
+    storeState.providers = [{ id: 1 }]
+    storeState.providerTypes = [{ type: 'openai' }]
+
+    expect(getters.getAll(storeState)(42)).toEqual([{ id: 1 }])
+    expect(getters.getTypes(storeState)(42)).toEqual([{ type: 'openai' }])
+    expect(getters.hasLoaded(storeState)).toBe(true)
+    expect(getters.getWorkspaceId(storeState)).toBe(42)
+    expect(getters.isLoaded(storeState)(42)).toBe(true)
+
+    expect(getters.getAll(storeState)(null)).toEqual([])
+    expect(getters.getAll(storeState)(7)).toEqual([])
+    expect(getters.getTypes(storeState)(null)).toEqual([])
+    expect(getters.isLoaded(storeState)(null)).toBe(false)
+  })
+
   test('refresh replaces provider state without reloading provider types', async () => {
     const commit = vi.fn()
+    const storeState = makeState()
+    storeState.loaded = true
 
-    const providers = await actions.refresh.call({ $client: {} }, { commit })
+    const providers = await actions.refresh.call(
+      { $client: {} },
+      { commit, state: storeState }
+    )
 
+    expect(aiProviderService).toHaveBeenCalledWith({}, null)
     expect(service.fetchAll).toHaveBeenCalledOnce()
     expect(service.fetchTypes).not.toHaveBeenCalled()
     expect(commit).toHaveBeenCalledWith('SET_PROVIDERS', [{ id: 1 }])
     expect(providers).toEqual([{ id: 1 }])
   })
 
+  test('realtime snapshots replace only the loaded matching scope', () => {
+    const commit = vi.fn()
+    const storeState = makeState()
+    storeState.loaded = true
+    storeState.workspaceId = 42
+
+    actions.replaceFromRealtime(
+      { commit, state: storeState },
+      { workspaceId: 7, providers: [{ id: 7 }] }
+    )
+    expect(commit).not.toHaveBeenCalled()
+
+    actions.replaceFromRealtime(
+      { commit, state: storeState },
+      { workspaceId: 42, providers: [{ id: 42 }] }
+    )
+    expect(commit).toHaveBeenCalledOnce()
+    expect(commit).toHaveBeenCalledWith('SET_PROVIDERS', [{ id: 42 }])
+  })
+
+  test('workspace actions scope all requests to the workspace', async () => {
+    const committed = []
+    await actions.fetchInitial.call(
+      { $client: {} },
+      {
+        commit: (type, payload) => committed.push([type, payload]),
+        state: makeState(),
+      },
+      { workspaceId: 42 }
+    )
+
+    expect(aiProviderService).toHaveBeenCalledWith({}, 42)
+    expect(committed).toContainEqual(['SET_WORKSPACE_ID', 42])
+
+    const values = { is_active: false }
+    const storeState = makeState()
+    storeState.workspaceId = 42
+    await actions.update.call(
+      { $client: {} },
+      { commit: vi.fn(), state: storeState },
+      { providerId: 1, values, workspaceId: 42 }
+    )
+
+    expect(aiProviderService).toHaveBeenLastCalledWith({}, 42)
+    expect(service.update).toHaveBeenCalledWith(1, values)
+  })
+
+  test('a mutation for an abandoned scope never commits', async () => {
+    const storeState = makeState()
+    storeState.workspaceId = 1
+    let resolveCreate
+    service.create.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveCreate = resolve
+      })
+    )
+    const commit = vi.fn()
+
+    const stale = actions.create.call(
+      { $client: {} },
+      { commit, state: storeState },
+      {
+        workspaceId: 1,
+        values: { provider_type: 'openai', api_key: 'secret' },
+      }
+    )
+    storeState.workspaceId = 2
+    resolveCreate({ data: { id: 1 } })
+    const provider = await stale
+
+    expect(provider).toEqual({ id: 1 })
+    expect(commit).not.toHaveBeenCalled()
+  })
+
+  test('refresh preserves the loaded workspace scope', async () => {
+    const storeState = makeState()
+    storeState.workspaceId = 42
+    storeState.loaded = true
+
+    await actions.refresh.call(
+      { $client: {} },
+      { commit: vi.fn(), state: storeState }
+    )
+
+    expect(aiProviderService).toHaveBeenCalledWith({}, 42)
+  })
+
   test('update sends exactly the fields supplied by the form', async () => {
     const values = { is_active: false }
     await actions.update.call(
       { $client: {} },
-      { commit: vi.fn() },
+      { commit: vi.fn(), state: makeState() },
       { providerId: 1, values }
     )
 
@@ -101,13 +292,41 @@ describe('AI provider store', () => {
     ])
   })
 
+  test('create responses upsert data already delivered by realtime', () => {
+    const state = makeState()
+    state.providers = [
+      { id: 1, provider_type: 'openai', models: [{ id: 2, value: 'old' }] },
+    ]
+
+    mutations.ADD_PROVIDER(state, {
+      id: 1,
+      provider_type: 'openai',
+      models: [{ id: 2, value: 'new' }],
+    })
+    mutations.ADD_MODEL(state, {
+      providerId: 1,
+      model: { id: 2, value: 'newer' },
+    })
+
+    expect(state.providers).toEqual([
+      {
+        id: 1,
+        provider_type: 'openai',
+        models: [{ id: 2, value: 'newer' }],
+      },
+    ])
+  })
+
   test('one test action updates all returned saved model results', async () => {
     const committed = []
     const values = { model_ids: [2] }
 
     const results = await actions.testModels.call(
       { $client: {} },
-      { commit: (type, payload) => committed.push([type, payload]) },
+      {
+        commit: (type, payload) => committed.push([type, payload]),
+        state: makeState(),
+      },
       values
     )
 

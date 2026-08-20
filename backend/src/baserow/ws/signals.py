@@ -15,7 +15,7 @@ from baserow.api.workspaces.serializers import (
     WorkspaceUserWorkspaceSerializer,
 )
 from baserow.core import signals
-from baserow.core.ai_provider.signals import ai_provider_changed
+from baserow.core.ai_provider.signals import ai_provider_updated
 from baserow.core.db import specific_iterator
 from baserow.core.handler import CoreHandler
 from baserow.core.jobs import signals as jobs_signals
@@ -29,6 +29,7 @@ from baserow.core.user import signals as user_signals
 from baserow.core.utils import generate_hash
 
 from .tasks import (
+    broadcast_ai_provider_update,
     broadcast_application_created,
     broadcast_to_group,
     broadcast_to_groups,
@@ -38,16 +39,21 @@ from .tasks import (
 )
 
 
-@receiver(ai_provider_changed)
-def ai_provider_updated(sender, workspace_models_changed, **kwargs):
+@receiver(ai_provider_updated)
+def broadcast_ai_provider_updated(
+    sender, model_availability_updated, workspace=None, **kwargs
+):
+    """
+    Schedule one server-computed realtime update after the database transaction.
+
+    The task builds user-specific payloads containing every provider and enabled-model
+    snapshot that user may see, so clients never need to fetch state after the event.
+    """
+
+    workspace_id = workspace.id if workspace is not None else None
     transaction.on_commit(
-        lambda: broadcast_to_users.delay(
-            [],
-            {
-                "type": "ai_provider_updated",
-                "workspace_models_changed": workspace_models_changed,
-            },
-            send_to_all_users=True,
+        lambda: broadcast_ai_provider_update.delay(
+            workspace_id, model_availability_updated
         )
     )
 

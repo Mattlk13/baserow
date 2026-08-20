@@ -525,18 +525,29 @@ export class RealTimeHandler {
       store.dispatch('auth/forceUpdateUserData', data.user_data)
     })
 
-    this.registerEvent('ai_provider_updated', async ({ store }, data) => {
-      const refreshes = []
-      if (
-        store.getters['workspace/isLoaded'] &&
-        data.workspace_models_changed
-      ) {
-        refreshes.push(store.dispatch('workspace/refreshAllGenerativeAIModels'))
+    this.registerEvent('ai_provider_updated', ({ store }, data) => {
+      for (const [workspaceId, enabledModels] of Object.entries(
+        data.generative_ai_models_enabled_by_workspace || {}
+      )) {
+        store.dispatch('workspace/forceUpdateGenerativeAIModels', {
+          workspaceId: Number(workspaceId),
+          generativeAIModelsEnabled: enabledModels,
+        })
       }
-      if (store.getters['aiProvider/isLoaded']) {
-        refreshes.push(store.dispatch('aiProvider/refresh'))
+
+      if (store.getters['aiProvider/hasLoaded']) {
+        const workspaceId = store.getters['aiProvider/getWorkspaceId']
+        const providers =
+          workspaceId === null
+            ? data.instance_ai_providers
+            : data.ai_providers_by_workspace?.[workspaceId]
+        if (providers !== undefined) {
+          store.dispatch('aiProvider/replaceFromRealtime', {
+            workspaceId,
+            providers,
+          })
+        }
       }
-      await Promise.allSettled(refreshes)
     })
 
     this.registerEvent('user_updated', ({ store }, data) => {

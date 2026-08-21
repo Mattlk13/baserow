@@ -302,3 +302,113 @@ def test_delete_node_wrong_workspace(data_fixture):
 
     # Node should still exist
     assert AutomationNode.objects.filter(id=action_node.id).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_literal_values_with_apostrophes_stay_valid_formulas(data_fixture):
+    """
+    Regression test: literal values coming from the LLM used to be wrapped as
+    `f"'{value}'"`, so a value such as `Sales Managers' Week 3` was persisted as
+    an unparsable formula. It only blew up later, when the workflow was
+    duplicated, exported or imported.
+    """
+
+    from baserow.contrib.automation.workflows.service import AutomationWorkflowService
+    from baserow.core.formula import BaserowFormulaObject
+    from baserow_enterprise.assistant.tools.shared.formula_utils import is_valid_formula
+
+    user = data_fixture.create_user()
+    workspace = data_fixture.create_workspace(user=user)
+    database = data_fixture.create_database_application(user=user, workspace=workspace)
+    table = data_fixture.create_database_table(database=database)
+    field = data_fixture.create_text_field(table=table)
+    automation = data_fixture.create_automation_application(
+        user=user, workspace=workspace
+    )
+    workflow = data_fixture.create_automation_workflow(automation=automation)
+    node = data_fixture.create_local_baserow_create_row_action_node(
+        user=user, workflow=workflow, service_kwargs={"table": table}
+    )
+
+    node_create = ActionNodeCreate(
+        ref="row1",
+        label="Create row",
+        previous_node_ref="trigger1",
+        type="create_row",
+        table_id=table.id,
+        row_id="Sales Managers' Week 3",
+        values=[{"field_id": field.id, "value": "Sales Managers' Week 3"}],
+    )
+    node_create.apply_direct_values(node.service)
+
+    service = node.service.specific
+    service.refresh_from_db()
+    mapping = service.field_mappings.get(field_id=field.id)
+
+    assert is_valid_formula(BaserowFormulaObject.to_formula(mapping.value)["formula"])
+    assert is_valid_formula(BaserowFormulaObject.to_formula(service.row_id)["formula"])
+
+    # The workflow must remain duplicable, which is where the invalid formula
+    # used to surface as a `BaserowFormulaSyntaxError`.
+    duplicated = AutomationWorkflowService().duplicate_workflow(user, workflow)
+
+    assert duplicated.id != workflow.id
+
+
+@pytest.mark.django_db(transaction=True)
+def test_router_edge_conditions_stay_valid_formulas(data_fixture):
+    """
+    Generated router edge conditions are written into the edge's JSON
+    ``condition`` instead of a service field, so they must go through
+    ``ensure_valid_formula`` like every other assistant-written formula. An
+    unparsable condition falls back to a string literal so the workflow stays
+    duplicable, exportable and importable.
+    """
+
+    from baserow.contrib.automation.workflows.service import AutomationWorkflowService
+    from baserow.core.formula.types import BASEROW_FORMULA_MODE_ADVANCED
+    from baserow_enterprise.assistant.tools.automation.types.node import (
+        RouterEdgeCreate,
+    )
+    from baserow_enterprise.assistant.tools.shared.formula_utils import is_valid_formula
+
+    user = data_fixture.create_user()
+    router_node = data_fixture.create_core_router_action_node_with_edges(
+        user=user
+    ).router
+
+    node_create = ActionNodeCreate(
+        ref="router1",
+        label="Router",
+        previous_node_ref="trigger1",
+        type="router",
+        edges=[
+            RouterEdgeCreate(label="Do this", condition="High priority"),
+            RouterEdgeCreate(label="Do that", condition="Low priority"),
+        ],
+    )
+    node_create.update_service_with_formulas(
+        router_node.service,
+        {
+            "Do this": "get('previous_node.1.field')",
+            "Do that": "Managers' pick",  # unparsable: unterminated string literal
+        },
+    )
+
+    edges = router_node.service.specific.edges
+    valid_edge = edges.get(label="Do this")
+    assert valid_edge.condition["formula"] == "get('previous_node.1.field')"
+    assert valid_edge.condition["mode"] == BASEROW_FORMULA_MODE_ADVANCED
+
+    fallback_edge = edges.get(label="Do that")
+    assert fallback_edge.condition["formula"] == "'Managers\\' pick'"
+    assert is_valid_formula(fallback_edge.condition["formula"])
+    assert fallback_edge.condition["mode"] == BASEROW_FORMULA_MODE_ADVANCED
+
+    # The workflow must remain duplicable, which is where an unparsable
+    # condition would surface in the formula importer.
+    duplicated = AutomationWorkflowService().duplicate_workflow(
+        user, router_node.workflow
+    )
+
+    assert duplicated.id != router_node.workflow.id

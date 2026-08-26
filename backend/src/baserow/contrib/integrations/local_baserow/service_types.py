@@ -1636,6 +1636,12 @@ class LocalBaserowAggregateRowsUserServiceType(
         Returns the usual properties for this service type.
         """
 
+        if not path:
+            # When path is empty, e.g. `get('data_source.123')`, we should
+            # return all properties since we don't know which specific
+            # properties are needed.
+            return ["result"]
+
         if path[0] == "result":
             return ["result"]
 

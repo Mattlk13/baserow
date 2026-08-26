@@ -45,10 +45,23 @@
   },
   "builderSettingTypes": {
     "generalName": "General",
+    "breakpointsName": "Breakpoints",
     "integrationsName": "Integrations",
     "themeName": "Theme",
     "domainsName": "Domains",
     "userSourcesName": "Users"
+  },
+  "breakpointSettings": {
+    "titleOverview": "Breakpoints",
+    "description": "Choose when your app switches between mobile, tablet, and desktop layouts. Changes apply in the editor now and to your published app after you publish.",
+    "mobileLabel": "Mobile breakpoint",
+    "tabletLabel": "Tablet breakpoint",
+    "desktopLabel": "Desktop breakpoint",
+    "desktopDescription": "Above {breakpoint}px",
+    "updatedTitle": "Breakpoints saved",
+    "updatedDescription": "Your new breakpoints are active in the editor. Publish your app to apply them to visitors.",
+    "mobileMustBeLessThanTablet": "The mobile breakpoint must be less than the tablet breakpoint.",
+    "tabletMustBeGreaterThanMobile": "The tablet breakpoint must be greater than the mobile breakpoint."
   },
   "createPageModal": {
     "header": "Create page",

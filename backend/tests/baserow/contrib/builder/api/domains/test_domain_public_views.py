@@ -146,6 +146,7 @@ def test_get_public_builder_by_domain_name(api_client, data_fixture):
         == UserFileSerializer(builder_to.favicon_file).data
     )
     assert response_json["login_page_id"] is None
+    assert response_json["breakpoints"] == {"mobile": 640, "tablet": 1024}
     assert response_json["workspace"] == {
         "generative_ai_models_enabled": {},
         "id": workspace.id,

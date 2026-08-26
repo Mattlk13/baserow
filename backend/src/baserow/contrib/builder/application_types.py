@@ -20,7 +20,13 @@ from baserow.contrib.builder.constants import IMPORT_SERIALIZED_IMPORTING
 from baserow.contrib.builder.data_providers.registries import (
     builder_data_provider_type_registry,
 )
-from baserow.contrib.builder.models import Builder
+from baserow.contrib.builder.models import (
+    LEGACY_BUILDER_BREAKPOINTS,
+    MAX_BUILDER_BREAKPOINT,
+    MIN_BUILDER_BREAKPOINT,
+    Builder,
+    validate_builder_breakpoints,
+)
 from baserow.contrib.builder.operations import ListPagesBuilderOperationType
 from baserow.contrib.builder.pages.handler import PageHandler
 from baserow.contrib.builder.pages.models import Page
@@ -59,16 +65,22 @@ class BuilderApplicationType(ApplicationType):
     supports_actions = False
     supports_integrations = True
     supports_user_sources = True
-    allowed_fields = ["favicon_file", "login_page_id"]
+    allowed_fields = [
+        "favicon_file",
+        "login_page_id",
+        "breakpoints",
+    ]
     serializer_field_names = [
         "favicon_file",
         "login_page_id",
+        "breakpoints",
         "pages",
         "theme",
     ]
     public_serializer_field_names = [
         "favicon_file",
         "login_page_id",
+        "breakpoints",
         "pages",
         "theme",
         "user_sources",
@@ -76,6 +88,7 @@ class BuilderApplicationType(ApplicationType):
     request_serializer_field_names = [
         "favicon_file",
         "login_page_id",
+        "breakpoints",
     ]
 
     serializer_mixins = [lazy_get_instance_serializer_class]
@@ -90,6 +103,7 @@ class BuilderApplicationType(ApplicationType):
     def serializer_field_overrides(self):
         from baserow.api.user_files.serializers import UserFileField
         from baserow.contrib.builder.api.validators import (
+            breakpoints_validator,
             image_file_validation,
             login_page_id_validator,
         )
@@ -108,6 +122,20 @@ class BuilderApplicationType(ApplicationType):
                 default=None,
                 help_text=Builder._meta.get_field("login_page").help_text,
                 validators=[login_page_id_validator],
+            ),
+            "breakpoints": serializers.DictField(
+                child=serializers.IntegerField(
+                    min_value=MIN_BUILDER_BREAKPOINT,
+                    max_value=MAX_BUILDER_BREAKPOINT,
+                ),
+                validators=[breakpoints_validator],
+                required=False,
+                help_text=(
+                    "The maximum widths in pixels for the responsive layouts, "
+                    f"between {MIN_BUILDER_BREAKPOINT} and "
+                    f"{MAX_BUILDER_BREAKPOINT} pixels. Mobile and tablet "
+                    "breakpoints are required."
+                ),
             ),
         }
 
@@ -258,6 +286,7 @@ class BuilderApplicationType(ApplicationType):
             user_sources=serialized_user_sources,
             favicon_file=serialized_favicon_file,
             login_page=serialized_login_page,
+            breakpoints=builder.breakpoints,
             **serialized_builder,
         )
 
@@ -366,6 +395,9 @@ class BuilderApplicationType(ApplicationType):
         serialized_integrations = serialized_values.pop("integrations")
         serialized_user_sources = serialized_values.pop("user_sources")
         serialized_theme = serialized_values.pop("theme")
+        breakpoints = validate_builder_breakpoints(
+            serialized_values.pop("breakpoints", LEGACY_BUILDER_BREAKPOINTS.copy())
+        )
 
         (
             builder_progress,
@@ -394,6 +426,11 @@ class BuilderApplicationType(ApplicationType):
         )
 
         builder = application.specific
+        # Breakpoints were added after builder applications already existed. An
+        # export without them is therefore a legacy configuration, not a newly
+        # created builder application that should receive the new defaults.
+        builder.breakpoints = breakpoints
+        builder.save(update_fields=["breakpoints"])
 
         if not serialized_integrations:
             progress.increment(

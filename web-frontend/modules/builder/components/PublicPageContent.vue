@@ -145,6 +145,14 @@ const themeStyle = computed(() =>
   )
 )
 
+const elementResponsiveStyles = computed(() =>
+  $registry
+    .getList('element')
+    .map((elementType) => elementType.getPublicResponsiveStyles(props.builder))
+    .filter(Boolean)
+    .join('\n')
+)
+
 const headConfig = computed(() => {
   const cssVars = Object.entries(themeStyle.value)
     .map(([key, value]) => `\n${key}: ${value};`)
@@ -156,7 +164,13 @@ const headConfig = computed(() => {
     bodyAttrs: {
       class: 'public-page',
     },
-    style: [{ innerHTML: `:root { ${cssVars} }`, type: 'text/css' }],
+    style: [
+      { innerHTML: `:root { ${cssVars} }`, type: 'text/css' },
+      {
+        innerHTML: elementResponsiveStyles.value,
+        type: 'text/css',
+      },
+    ],
   }
 
   if (faviconLinks.value) {

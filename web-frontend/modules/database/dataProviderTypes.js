@@ -1,4 +1,6 @@
 import { DataProviderType } from '@baserow/modules/core/dataProviderTypes'
+import { getValueAtPath } from '@baserow/modules/core/utils/object'
+import { workflowActionKey } from '@baserow/modules/database/utils/workflowActionReconciliation'
 
 export class FieldsDataProviderType extends DataProviderType {
   static getType() {
@@ -117,5 +119,102 @@ export class RowDataProviderType extends DataProviderType {
       throw new Error(`No row context to resolve ${name}.`)
     }
     return row[name] ?? null
+  }
+}
+
+/**
+ * Exposes what the earlier actions of a click returned, so a later action can
+ * use them. An action is offered only the actions before it in the list, which
+ * is what keeps a reference pointing backwards.
+ */
+export class PreviousActionDataProviderType extends DataProviderType {
+  static getType() {
+    return 'previous_action'
+  }
+
+  get name() {
+    return this.app.$i18n.t('dataProviderTypes.previousActionName')
+  }
+
+  getDataContent(applicationContext) {
+    return applicationContext.previousActionResults || {}
+  }
+
+  /**
+   * The actions before the one whose formula is being edited.
+   */
+  previousActions(applicationContext) {
+    const actions = applicationContext.workflowActions || []
+    const current = applicationContext.workflowAction
+    if (!current) {
+      return []
+    }
+    const index = actions.findIndex(
+      (action) => workflowActionKey(action) === workflowActionKey(current)
+    )
+    return index === -1 ? [] : actions.slice(0, index)
+  }
+
+  getDataSchema(applicationContext) {
+    const schemas = this.previousActions(applicationContext)
+      .map((action) => [
+        action,
+        action.type
+          ? this.app.$registry
+              .get('databaseWorkflowActionType', action.type)
+              .getDataSchema(applicationContext, action)
+          : null,
+      ])
+      .filter(([, schema]) => schema)
+
+    // Two actions of the same type would otherwise be indistinguishable.
+    const seen = {}
+    const properties = Object.fromEntries(
+      schemas.map(([action, schema]) => {
+        seen[action.type] = (seen[action.type] || 0) + 1
+        const suffix = seen[action.type] > 1 ? ` ${seen[action.type]}` : ''
+        return [
+          workflowActionKey(action),
+          { ...schema, title: `${schema.title}${suffix}` },
+        ]
+      })
+    )
+
+    return { type: 'object', properties }
+  }
+
+  /**
+   * Mirrors the backend provider, which raises rather than resolving a broken
+   * reference to nothing. Resolving to nothing here would leave a hole in a URL
+   * and open it anyway, which is the whole failure this phase avoids.
+   */
+  getDataChunk(applicationContext, path) {
+    const [actionId, ...rest] = path
+    const results = applicationContext.previousActionResults
+    if (results === undefined) {
+      // The editor resolves formulas for its own preview long before anything
+      // has run, so there is nothing to read yet and nothing wrong with that.
+      // Only a real click carries results, and only there is a broken
+      // reference a failure.
+      return null
+    }
+    const entry = results[actionId]
+    if (entry === undefined) {
+      throw new Error(`Action ${actionId} did not run in this click.`)
+    }
+    if (rest.length === 0) {
+      return entry.data
+    }
+    if (entry.data === null || typeof entry.data !== 'object') {
+      throw new Error('The previous action returned nothing to read.')
+    }
+    const [fieldRef, ...tail] = rest
+    // The result is keyed by field name, the path by `field_<id>`.
+    const key = entry.fieldNames?.[fieldRef] ?? fieldRef
+    // Any segment, not only a `field_` one, as the backend does.
+    if (!Object.prototype.hasOwnProperty.call(entry.data, key)) {
+      throw new Error(`${fieldRef} is not in the previous action's result.`)
+    }
+    return getValueAtPath(entry.data, [key, ...tail])
   }
 }

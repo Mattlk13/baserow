@@ -18,6 +18,7 @@
     <div v-if="loadingActions" class="loading-spinner margin-top-2"></div>
     <ButtonFieldActionList
       v-else
+      ref="actionList"
       :value="localActions"
       :database="database"
       @input="localActions = $event"
@@ -39,9 +40,15 @@ import {
   CLIENT_ID_KEY,
   reconcileWorkflowActions,
   workflowActionConfig,
+  workflowActionKey,
 } from '@baserow/modules/database/utils/workflowActionReconciliation'
+import {
+  rewriteActionFormulaIds,
+  unresolvedActionIds,
+} from '@baserow/modules/database/utils/workflowActionFormulas'
 import { clone } from '@baserow/modules/core/utils/object'
 import { notifyIf } from '@baserow/modules/core/utils/error'
+import { FIELDS_UNAVAILABLE } from '@baserow/modules/database/utils/buttonField'
 
 export default {
   name: 'FieldButtonSubForm',
@@ -52,11 +59,13 @@ export default {
       workspace: this.database.workspace,
       // `InjectedFormulaInput` resolves what to render from this injection.
       formulaComponent: markRaw(DatabaseFormulaInput),
-      // An action's arguments can only resolve the clicked row; the dispatch
-      // context carries no human readable values (ADR 006 section 4).
-      dataProvidersAllowed: ['row'],
+      // An action's arguments resolve the clicked row and what the actions
+      // before them returned (ADR 006 section 4). Human readable values are
+      // absent from the dispatch context, so `fields` is not offered.
+      dataProvidersAllowed: ['row', 'previous_action'],
       // Lazy, so the explorer picks up the table's fields as they load.
       databaseFormulaContext: computed(() => this.applicationContext),
+      registerTableFields: this.registerTableFields,
     }
   },
   setup() {
@@ -73,6 +82,10 @@ export default {
       serverActions: [],
       localActions: [],
       loadingActions: false,
+      // Target table fields, by table id, reported by the action forms that
+      // fetched them. An action that has never been saved carries no service
+      // schema, so this is the only description of what it will return.
+      tableFields: {},
     }
   },
   computed: {
@@ -88,6 +101,14 @@ export default {
               f.id !== this.defaultValues.id &&
               !this.$registry.get('field', f.type).isWriteOnlyField(f)
           ),
+      })
+      Object.defineProperty(context, 'workflowActions', {
+        enumerable: true,
+        get: () => this.localActions,
+      })
+      Object.defineProperty(context, 'tableFields', {
+        enumerable: true,
+        get: () => this.tableFields,
       })
       return context
     },
@@ -107,6 +128,55 @@ export default {
     }
   },
   methods: {
+    /** The action list is outside the form chain, so touch it here too. */
+    touch(deep = false) {
+      form.methods.touch.call(this, deep)
+      this.$refs.actionList?.touch()
+    },
+    registerTableFields(tableId, fields) {
+      // Two actions can point at the same table, and a fetch that failed for
+      // one of them says nothing about the fields the other already has.
+      if (
+        fields === FIELDS_UNAVAILABLE &&
+        Array.isArray(this.tableFields[tableId])
+      ) {
+        return
+      }
+      this.tableFields = { ...this.tableFields, [tableId]: fields }
+    },
+    /**
+     * Rewrites the client ids in a payload's formulas to the real ones. A
+     * client id left over means an action referenced one that had not been
+     * created, so it is raised rather than sent.
+     */
+    resolveActionIds(payload, idMap) {
+      const resolved = rewriteActionFormulaIds(payload, idMap)
+      const unresolved = unresolvedActionIds(resolved)
+      if (unresolved.length > 0) {
+        throw this.unresolvedReferenceError(unresolved)
+      }
+      return resolved
+    },
+    /**
+     * `notifyIf` presents an error only when it carries a handler, and rethrows
+     * anything else. A rethrow here would escape the caller before it can flag
+     * the failure, and the editor would then close and discard the very edits
+     * the user has to fix. Carrying a handler keeps it a normal failed save.
+     */
+    unresolvedReferenceError(unresolved) {
+      const error = new Error(
+        `Unresolved workflow action reference: ${unresolved.join(', ')}`
+      )
+      error.handler = {
+        notifyIf: () => {
+          this.$store.dispatch('toast/error', {
+            title: this.$t('fieldButtonSubForm.unresolvedReferenceTitle'),
+            message: this.$t('fieldButtonSubForm.unresolvedReferenceMessage'),
+          })
+        },
+      }
+      return error
+    },
     /**
      * Only the field's own values. The nested service forms register up this
      * chain, and their values go to the workflow action endpoints instead.
@@ -122,6 +192,9 @@ export default {
     async reset(deep = false) {
       await form.methods.reset.call(this, deep)
       this.localActions = clone(this.serverActions)
+      // The flag is keyed by a saved action's id, so it would outlive the
+      // cancel and keep hiding that action's own error.
+      this.$refs.actionList?.revealErrors()
     },
     /**
      * Fetches the field's actions and resets both the server list and the
@@ -147,10 +220,20 @@ export default {
       if (assignedIds.size === 0) {
         return
       }
+      const idMap = Object.fromEntries(assignedIds)
       this.localActions = this.localActions.map((action) => {
-        const created = assignedIds.get(action[CLIENT_ID_KEY])
-        return created === undefined ? action : { ...action, id: created }
+        const created = assignedIds.get(workflowActionKey(action))
+        const adopted =
+          created === undefined ? action : { ...action, id: created }
+        // References to the actions that did get made have to follow them too.
+        // Without this a retry sees a client id whose action is no longer in
+        // `toCreate`, so nothing maps it and the save can never succeed.
+        return rewriteActionFormulaIds(adopted, idMap)
       })
+      // An adopted action is a different row to everything keyed by what
+      // identified it, so the card the user is fixing would collapse and lose
+      // the flag holding its error back.
+      this.$refs.actionList?.remapActionKeys(idMap)
     },
     /**
      * Adds the `type` the API needs to a payload's `service`, taken from the
@@ -208,14 +291,29 @@ export default {
       // Captured before the `finally` below re-fetches and replaces the list.
       const serverById = new Map(this.serverActions.map((a) => [a.id, a]))
 
+      // An unsaved action is referenced by its client id until the server
+      // gives it a real one. References only ever point backwards, so creating
+      // in list order means everything an action names already has its id.
+      const idMap = {}
+
       try {
         for (const action of toCreate) {
           const { data } = await service.create(
             fieldId,
-            this.createPayload(action)
+            this.resolveActionIds(this.createPayload(action), idMap)
           )
           createdIds.push(data.id)
-          assignedIds.set(action[CLIENT_ID_KEY], data.id)
+          // Both ways of naming it are mapped: an unsaved action is referenced
+          // by its client id, while one the server has forgotten, deleted by a
+          // collaborator say, is referenced by the id it used to have. Neither
+          // is left out, or the actions after it would keep naming something
+          // that no longer exists and every click would fail on it.
+          for (const key of [action[CLIENT_ID_KEY], action.id]) {
+            if (key != null) {
+              assignedIds.set(key, data.id)
+              idMap[key] = data.id
+            }
+          }
         }
 
         for (const { id, values } of toUpdate) {
@@ -223,16 +321,22 @@ export default {
           // action is of the new type. Sending it along would type the service
           // from the server's copy, which is still the old type.
           const defersConfig = values.type !== undefined && 'service' in values
-          const payload = defersConfig
-            ? _.omit(values, 'service')
-            : this.withTypedService(values, serverById.get(id))
+          const payload = this.resolveActionIds(
+            defersConfig
+              ? _.omit(values, 'service')
+              : this.withTypedService(values, serverById.get(id)),
+            idMap
+          )
           // Skip rather than send an empty PATCH.
           if (Object.keys(payload).length === 0) {
             continue
           }
           const { data } = await service.update(id, payload)
           if (defersConfig) {
-            const config = this.configPayload(values, data)
+            const config = this.resolveActionIds(
+              this.configPayload(values, data),
+              idMap
+            )
             if (Object.keys(config).length > 0) {
               await service.update(data?.id ?? id, config)
             }

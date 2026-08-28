@@ -10,11 +10,17 @@
 import form from '@baserow/modules/core/mixins/form'
 import FieldService from '@baserow/modules/database/services/field'
 import { notifyIf } from '@baserow/modules/core/utils/error'
+import { FIELDS_UNAVAILABLE } from '@baserow/modules/database/utils/buttonField'
 import { DatabaseApplicationType } from '@baserow/modules/database/applicationTypes'
 
 export default {
   name: 'DatabaseWorkflowActionWithService',
   mixins: [form],
+  inject: {
+    // The sub-form collects these so the data explorer can describe what an
+    // unsaved action will return.
+    registerTableFields: { from: 'registerTableFields', default: null },
+  },
   props: {
     workflowAction: {
       type: Object,
@@ -117,13 +123,19 @@ export default {
         if (token !== this.fetchToken) {
           return
         }
-        // The same filter the schema applies.
+        // The same filter the schema applies. Unfiltered for the explorer,
+        // which can read a created row's read only fields.
         this.mappableFields = data.filter((field) => !field.read_only)
+        this.registerTableFields?.(tableId, data)
       } catch (error) {
         if (token !== this.fetchToken) {
           return
         }
         this.mappableFields = []
+        // Marked rather than left alone, so the explorer offers this action's
+        // `id` and nothing else. Without it the schema falls back to the last
+        // save's, which describes the table it pointed at before.
+        this.registerTableFields?.(tableId, FIELDS_UNAVAILABLE)
         notifyIf(error, 'field')
       } finally {
         // Only the newest fetch owns the spinner, or an overtaken one

@@ -339,3 +339,267 @@ def test_a_failed_action_stops_the_client_actions(api_client, data_fixture):
     assert response.status_code == HTTP_400_BAD_REQUEST
     assert response.json()["error"] == "ERROR_WORKFLOW_ACTION_DISPATCH_FAILED"
     assert "client_actions" not in response.json()
+
+
+@pytest.mark.django_db
+def test_a_result_names_the_fields_it_returned(api_client, data_fixture):
+    """The result is keyed by field name, so the browser needs the ids to
+    resolve a `previous_action.<id>.field_<id>` path in an `open_url`."""
+
+    user, token = data_fixture.create_user_and_token()
+    table, name_field, button_field, row, action = _button_with_create_action(
+        data_fixture, user
+    )
+    # Only a client action reads a result, so only then are the names built.
+    data_fixture.create_database_workflow_action(
+        OpenUrlWorkflowAction,
+        field=button_field,
+        url={"formula": "'https://example.com'", "mode": "simple"},
+    )
+
+    response = api_client.post(
+        reverse(
+            "api:database:workflow_actions:dispatch",
+            kwargs={"field_id": button_field.id},
+        ),
+        {"row_id": row.id},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+
+    assert response.status_code == HTTP_200_OK, response.json()
+    (result,) = response.json()["results"]
+    assert result["workflow_action_id"] == action.id
+    assert result["field_names"][f"field_{name_field.id}"] == "Name"
+    assert result["data"]["Name"] == "Ada"
+
+
+@pytest.mark.django_db
+def test_an_action_returning_no_row_names_no_fields(api_client, data_fixture):
+    """A delete produces no row, so there is nothing for the browser to resolve
+    a name against and no reason to build a table model for it."""
+
+    user, token = data_fixture.create_user_and_token()
+    table, name_field, button_field, row, action = _button_with_create_action(
+        data_fixture, user
+    )
+    target = table.get_model().objects.create()
+    delete_action = data_fixture.create_database_workflow_action(
+        LocalBaserowDeleteRowWorkflowAction, field=button_field
+    )
+    service = delete_action.service.specific
+    service.table = table
+    service.row_id = str(target.id)
+    service.save()
+    data_fixture.create_database_workflow_action(
+        OpenUrlWorkflowAction,
+        field=button_field,
+        url={"formula": "'https://example.com'", "mode": "simple"},
+    )
+
+    response = api_client.post(
+        reverse(
+            "api:database:workflow_actions:dispatch",
+            kwargs={"field_id": button_field.id},
+        ),
+        {"row_id": row.id},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+
+    assert response.status_code == HTTP_200_OK, response.json()
+    results = {r["workflow_action_id"]: r for r in response.json()["results"]}
+    # The create still names its fields; the delete has none to name.
+    assert results[action.id]["field_names"] != {}
+    assert results[delete_action.id]["field_names"] == {}
+
+
+@pytest.mark.django_db
+def test_no_client_action_means_no_field_names(api_client, data_fixture):
+    user, token = data_fixture.create_user_and_token()
+    table, name_field, button_field, row, action = _button_with_create_action(
+        data_fixture, user
+    )
+
+    response = api_client.post(
+        reverse(
+            "api:database:workflow_actions:dispatch",
+            kwargs={"field_id": button_field.id},
+        ),
+        {"row_id": row.id},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+
+    (result,) = response.json()["results"]
+    assert result["field_names"] == {}
+
+
+@pytest.mark.django_db
+def test_a_result_carries_the_action_order(api_client, data_fixture):
+    """A client action always runs last, so its own place in the list is the
+    only thing that says which results it may read."""
+
+    user, token = data_fixture.create_user_and_token()
+    table, name_field, button_field, row, action = _button_with_create_action(
+        data_fixture, user
+    )
+    client_action = data_fixture.create_database_workflow_action(
+        OpenUrlWorkflowAction,
+        field=button_field,
+        url={"formula": "'https://example.com'", "mode": "simple"},
+    )
+
+    response = api_client.post(
+        reverse(
+            "api:database:workflow_actions:dispatch",
+            kwargs={"field_id": button_field.id},
+        ),
+        {"row_id": row.id},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+
+    assert response.status_code == HTTP_200_OK, response.json()
+    body = response.json()
+    (result,) = body["results"]
+    assert result["order"] == action.order
+    # Both sides of the comparison the browser makes are in the response.
+    assert body["client_actions"][0]["order"] == client_action.order
+
+
+@pytest.mark.django_db
+def test_two_actions_on_one_table_are_both_named(api_client, data_fixture):
+    """A client action resolves a `previous_action` path through these names,
+    so every result that returned a row needs its own set."""
+
+    user, token = data_fixture.create_user_and_token()
+    table, name_field, button_field, row, action = _button_with_create_action(
+        data_fixture, user
+    )
+    second = data_fixture.create_database_workflow_action(
+        LocalBaserowCreateRowWorkflowAction, field=button_field
+    )
+    service = second.service.specific
+    service.table = table
+    service.save()
+    service.field_mappings.create(field=name_field, value="'Grace'", enabled=True)
+    data_fixture.create_database_workflow_action(
+        OpenUrlWorkflowAction,
+        field=button_field,
+        url={"formula": "'https://example.com'", "mode": "simple"},
+    )
+
+    response = api_client.post(
+        reverse(
+            "api:database:workflow_actions:dispatch",
+            kwargs={"field_id": button_field.id},
+        ),
+        {"row_id": row.id},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+
+    assert response.status_code == HTTP_200_OK, response.json()
+    results = response.json()["results"]
+    assert len(results) == 2
+    assert all(r["field_names"][f"field_{name_field.id}"] == "Name" for r in results)
+
+
+@pytest.mark.django_db
+def test_a_reference_to_a_deleted_field_fails_the_click(api_client, data_fixture):
+    """A path names a field as `field_<id>` and the service turns that into the
+    field's name. A field the reference outlived has no name to be turned into,
+    so a field named literally `field_<id>` must not answer for it."""
+
+    user, token = data_fixture.create_user_and_token()
+    database = data_fixture.create_database_application(user=user)
+    table = TableHandler().create_table_and_fields(
+        user=user, database=database, name="People", fields=[("Name", "text", {})]
+    )
+    name_field = table.field_set.get(name="Name")
+    # An id no field of this table has, and a field named after it.
+    missing_id = name_field.id + 1000
+    alias_field = data_fixture.create_text_field(
+        table=table, name=f"field_{missing_id}"
+    )
+    button_field = data_fixture.create_button_field(table=table, label="Go")
+    row = table.get_model().objects.create()
+
+    first = data_fixture.create_database_workflow_action(
+        LocalBaserowCreateRowWorkflowAction, field=button_field
+    )
+    first.service.specific.table = table
+    first.service.specific.save()
+    first.service.specific.field_mappings.create(
+        field=alias_field, value="'aliased value'", enabled=True
+    )
+
+    second = data_fixture.create_database_workflow_action(
+        LocalBaserowCreateRowWorkflowAction, field=button_field
+    )
+    second.service.specific.table = table
+    second.service.specific.save()
+    second.service.specific.field_mappings.create(
+        field=name_field,
+        value=f"get('previous_action.{first.id}.field_{missing_id}')",
+        enabled=True,
+    )
+
+    response = api_client.post(
+        reverse(
+            "api:database:workflow_actions:dispatch",
+            kwargs={"field_id": button_field.id},
+        ),
+        {"row_id": row.id},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+
+    assert response.status_code == HTTP_400_BAD_REQUEST, response.json()
+    assert response.json()["error"] == "ERROR_WORKFLOW_ACTION_DISPATCH_FAILED"
+    assert "Action 2 failed" in response.json()["detail"]
+    # The chain stopped rather than copying the value of the field that shares
+    # the deleted one's token.
+    names = [
+        getattr(created, f"field_{name_field.id}")
+        for created in table.get_model().objects.exclude(id=row.id)
+    ]
+    assert "aliased value" not in names
+
+
+@pytest.mark.django_db
+def test_actions_sharing_an_order_are_told_apart_by_position(api_client, data_fixture):
+    """Two actions created at once can be given the same `order`, which
+    execution then breaks by id. The browser only lets a client action read
+    what ran before it, so it needs the position rather than the order."""
+
+    user, token = data_fixture.create_user_and_token()
+    table, name_field, button_field, row, action = _button_with_create_action(
+        data_fixture, user
+    )
+    open_url = data_fixture.create_database_workflow_action(
+        OpenUrlWorkflowAction, field=button_field
+    )
+    open_url.url = "'https://example.com'"
+    open_url.save()
+    # Both at the same order, with the client action second by id.
+    button_field.workflow_actions.update(order=1)
+    assert action.id < open_url.id
+
+    response = api_client.post(
+        reverse(
+            "api:database:workflow_actions:dispatch",
+            kwargs={"field_id": button_field.id},
+        ),
+        {"row_id": row.id},
+        format="json",
+        HTTP_AUTHORIZATION=f"JWT {token}",
+    )
+
+    assert response.status_code == HTTP_200_OK, response.json()
+    body = response.json()
+    # The orders are equal, so only the positions say which ran first.
+    assert body["results"][0]["order"] == body["client_actions"][0]["order"]
+    assert body["results"][0]["position"] == 1
+    assert body["client_actions"][0]["position"] == 2

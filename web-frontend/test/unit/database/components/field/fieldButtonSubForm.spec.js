@@ -4,7 +4,9 @@ import { TestApp } from '@baserow/test/helpers/testApp'
 import FieldButtonSubForm from '@baserow/modules/database/components/field/FieldButtonSubForm'
 import { CLIENT_ID_KEY } from '@baserow/modules/database/utils/workflowActionReconciliation'
 import ButtonFieldActionList from '@baserow/modules/database/components/field/ButtonFieldActionList'
+import ButtonFieldActionForm from '@baserow/modules/database/components/field/ButtonFieldActionForm'
 import InjectedFormulaInput from '@baserow/modules/core/components/formula/InjectedFormulaInput'
+import { FIELDS_UNAVAILABLE } from '@baserow/modules/database/utils/buttonField'
 
 describe('FieldButtonSubForm', () => {
   let testApp = null
@@ -139,6 +141,212 @@ describe('FieldButtonSubForm', () => {
       // Nothing was persisted by the cancel itself.
       expect(wrapper.vm.$client.post).not.toHaveBeenCalled()
       expect(wrapper.vm.$client.delete).not.toHaveBeenCalled()
+    })
+
+    test('cancelling stops hiding a saved action own error', async () => {
+      // The list is kept mounted between opens and its pristine flag is keyed
+      // by the saved action's id, so without clearing it the action comes back
+      // as it was stored with its error still suppressed.
+      const saved = { id: 1, type: 'open_url', url: null, target: 'self' }
+      const wrapper = await mountForm({ type: 'button', label: 'Go', id: 7 })
+      wrapper.vm.serverActions = [saved]
+      wrapper.vm.localActions = [{ ...saved }]
+      await wrapper.vm.$nextTick()
+
+      const list = wrapper.vm.$refs.actionList
+      expect(
+        wrapper.findAll('[data-action-error]').map((node) => node.text())
+      ).toEqual(['databaseWorkflowActionType.noUrl'])
+
+      // Retyping it hides the error, which is right while it is being
+      // configured.
+      list.onActionTypeChanged(0, 'local_baserow_create_row')
+      wrapper.vm.localActions = list.value.map((action, index) =>
+        index === 0
+          ? { ...saved, type: 'local_baserow_create_row', service: {} }
+          : action
+      )
+      await wrapper.vm.$nextTick()
+      expect(list.pristineActions).not.toEqual({})
+
+      await wrapper.vm.reset()
+      await wrapper.vm.$nextTick()
+
+      expect(list.pristineActions).toEqual({})
+      expect(
+        wrapper.findAll('[data-action-error]').map((node) => node.text())
+      ).toEqual(['databaseWorkflowActionType.noUrl'])
+    })
+
+    test('a failed fetch does not drop fields another action fetched', async () => {
+      // The map is keyed by table only, so two actions can point at the same
+      // one. A fetch that failed for one of them says nothing about the fields
+      // the other already has.
+      const fields = [{ id: 3, name: 'Name', type: 'text', read_only: false }]
+      const wrapper = await mountForm({ type: 'button', label: 'Go', id: 7 })
+
+      wrapper.vm.registerTableFields(2, fields)
+      wrapper.vm.registerTableFields(2, FIELDS_UNAVAILABLE)
+
+      expect(wrapper.vm.tableFields[2]).toEqual(fields)
+
+      // A table with nothing fetched still records that the fetch failed.
+      wrapper.vm.registerTableFields(3, FIELDS_UNAVAILABLE)
+      expect(wrapper.vm.tableFields[3]).toBe(FIELDS_UNAVAILABLE)
+    })
+
+    test('an unresolved reference is presentable, so the edits survive', async () => {
+      // `notifyIf` rethrows an error with no handler, which would skip the flag
+      // that keeps the editor open, and the buffered edits would be discarded
+      // with nothing on screen to say why.
+      const wrapper = await mountForm({ type: 'button', label: 'Go', id: 7 })
+      wrapper.vm.serverActions = []
+      wrapper.vm.localActions = [
+        {
+          _clientId: 'later',
+          type: 'open_url',
+          url: { formula: "get('previous_action.earlier.id')", mode: 'simple' },
+        },
+      ]
+
+      await expect(wrapper.vm.afterFieldSaved(7)).rejects.toMatchObject({
+        handler: expect.any(Object),
+      })
+      expect(wrapper.vm.$client.post).not.toHaveBeenCalled()
+
+      // The buffered action is still there to be fixed.
+      expect(wrapper.vm.localActions).toHaveLength(1)
+    })
+
+    test('a reference between two new actions is rewritten as they are created', async () => {
+      // Neither action exists yet, so the second names the first by its client
+      // id. Creating in list order means the server id is known by the time the
+      // second is sent, and no client id may reach the API.
+      const wrapper = await mountForm({ type: 'button', label: 'Go', id: 7 })
+      wrapper.vm.serverActions = []
+      wrapper.vm.localActions = [
+        {
+          [CLIENT_ID_KEY]: 'first',
+          type: 'local_baserow_create_row',
+          service: { table_id: 3 },
+        },
+        {
+          [CLIENT_ID_KEY]: 'second',
+          type: 'open_url',
+          url: { formula: "get('previous_action.first.id')", mode: 'simple' },
+          target: 'self',
+        },
+      ]
+      wrapper.vm.$client.post
+        .mockResolvedValueOnce({
+          data: { id: 91, type: 'local_baserow_create_row' },
+        })
+        .mockResolvedValueOnce({ data: { id: 92, type: 'open_url' } })
+
+      await wrapper.vm.afterFieldSaved(7)
+
+      const [firstCall, secondCall] = wrapper.vm.$client.post.mock.calls
+      expect(firstCall[1].type).toBe('local_baserow_create_row')
+      expect(secondCall[1].url.formula).toBe("get('previous_action.91.id')")
+      expect(JSON.stringify(wrapper.vm.$client.post.mock.calls)).not.toContain(
+        CLIENT_ID_KEY
+      )
+    })
+
+    test('ids handed out before a failure are adopted by the references too', async () => {
+      // A save that stops part way leaves the created actions carrying real
+      // ids. Anything pointing at them has to follow, or the retry finds a
+      // client id that nothing maps and can never succeed.
+      const wrapper = await mountForm({ type: 'button', label: 'Go', id: 7 })
+      wrapper.vm.localActions = [
+        { _clientId: 'first', type: 'local_baserow_create_row', service: {} },
+        {
+          _clientId: 'second',
+          type: 'open_url',
+          url: { formula: "get('previous_action.first.id')", mode: 'simple' },
+        },
+      ]
+
+      wrapper.vm.adoptAssignedIds(new Map([['first', 91]]))
+
+      expect(wrapper.vm.localActions[0].id).toBe(91)
+      expect(wrapper.vm.localActions[1].url.formula).toBe(
+        "get('previous_action.91.id')"
+      )
+    })
+
+    test('two actions the server forgot do not end up sharing one id', async () => {
+      // Deleted by a collaborator, so both are created again, and both came
+      // from the server with no client id. Keying them by that would hand one
+      // id to the pair, and the next save would lose one of them.
+      const wrapper = await mountForm({ type: 'button', label: 'Go', id: 7 })
+      wrapper.vm.serverActions = []
+      wrapper.vm.localActions = [
+        { id: 41, type: 'open_url', url: { formula: "'a'", mode: 'simple' } },
+        { id: 42, type: 'open_url', url: { formula: "'b'", mode: 'simple' } },
+      ]
+
+      wrapper.vm.$client.post.mockResolvedValueOnce({
+        data: { id: 91, type: 'open_url' },
+      })
+      wrapper.vm.$client.post.mockRejectedValueOnce(new Error('nope'))
+
+      await expect(wrapper.vm.afterFieldSaved(7)).rejects.toThrow()
+
+      const ids = wrapper.vm.localActions.map((action) => action.id)
+      expect(new Set(ids).size).toBe(ids.length)
+    })
+
+    test('a reference to an action the server forgot follows it', async () => {
+      // The first action was deleted by a collaborator while this editor was
+      // open, so it is created again under a new id. The second names it by
+      // the id it used to have, which now belongs to nothing: left alone, the
+      // save succeeds and every click after it fails.
+      const wrapper = await mountForm({ type: 'button', label: 'Go', id: 7 })
+      wrapper.vm.serverActions = []
+      wrapper.vm.localActions = [
+        {
+          id: 41,
+          type: 'local_baserow_create_row',
+          service: { table_id: 3 },
+        },
+        {
+          id: 42,
+          type: 'open_url',
+          url: { formula: "get('previous_action.41.id')", mode: 'simple' },
+          target: 'self',
+        },
+      ]
+
+      wrapper.vm.$client.post
+        .mockResolvedValueOnce({
+          data: { id: 91, type: 'local_baserow_create_row' },
+        })
+        .mockResolvedValueOnce({ data: { id: 92, type: 'open_url' } })
+
+      await wrapper.vm.afterFieldSaved(7)
+
+      const [, secondCall] = wrapper.vm.$client.post.mock.calls
+      expect(secondCall[1].url.formula).toBe("get('previous_action.91.id')")
+    })
+
+    test('the open card follows an action that is given its id', async () => {
+      // The card is keyed by what identifies the action, so a save that stops
+      // part way would otherwise close the one the user is fixing and drop the
+      // flag holding its error back.
+      const wrapper = await mountForm({ type: 'button', label: 'Go', id: 7 })
+      wrapper.vm.localActions = [
+        { [CLIENT_ID_KEY]: 'first', type: 'open_url', url: { formula: "'a'" } },
+      ]
+      const list = wrapper.findComponent(ButtonFieldActionList)
+      list.vm.expandedActions = { first: true }
+      list.vm.pristineActions = { first: true }
+
+      wrapper.vm.adoptAssignedIds(new Map([['first', 91]]))
+      await wrapper.vm.$nextTick()
+
+      expect(list.vm.expandedActions).toEqual({ 91: true })
+      expect(list.vm.pristineActions).toEqual({ 91: true })
     })
 
     test('saving creates a new action with its config in one call', async () => {
@@ -686,8 +894,26 @@ describe('FieldButtonSubForm', () => {
       const provides = wrapper.vm.$.provides
 
       expect(provides.formulaComponent).toBeTruthy()
-      // Only the clicked row resolves in a button action's arguments.
-      expect(provides.dataProvidersAllowed).toEqual(['row'])
+      // The clicked row and what the earlier actions returned. Human readable
+      // values are absent from the dispatch context, so `fields` is not one.
+      expect(provides.dataProvidersAllowed).toEqual(['row', 'previous_action'])
+    })
+
+    test('an action form sees the sub-form context through its own', async () => {
+      // The action form provides a context of its own, and everything the
+      // sub-form exposes has to keep reaching the inputs under it.
+      const wrapper = await mountForm({ type: 'button', label: 'Go' })
+      wrapper.vm.localActions = [
+        { id: 1, type: 'open_url', url: { formula: "'x'", mode: 'simple' } },
+      ]
+      await wrapper.vm.$nextTick()
+
+      const context = wrapper.findComponent(ButtonFieldActionForm).vm.$.provides
+        .databaseFormulaContext
+
+      expect(context.workflowAction.id).toBe(1)
+      expect(context.workflowActions).toHaveLength(1)
+      expect(context.fields.map((field) => field.name)).toEqual(['Name'])
     })
 
     test('InjectedFormulaInput renders a real input under the sub-form', async () => {
@@ -703,6 +929,43 @@ describe('FieldButtonSubForm', () => {
         true
       )
       expect(input.html()).not.toBe('<!---->')
+    })
+
+    test('an input keeps its explorer context while the list is edited', async () => {
+      // The context an input reads is what its explorer is rebuilt from, so a
+      // new object on every keystroke rebuilds every mounted input's tree.
+      const form = await mountForm({ type: 'button', label: 'Go' })
+      const action = {
+        id: 1,
+        type: 'open_url',
+        url: { formula: "'x'", mode: 'simple' },
+      }
+      form.vm.localActions = [action]
+      await form.vm.$nextTick()
+
+      const actionForm = form.findComponent(ButtonFieldActionForm)
+      const input = await testApp.mount(InjectedFormulaInput, {
+        attrs: { modelValue: { formula: "'hi'", mode: 'simple' } },
+        // The action form's own provides sit on a prototype of the sub-form's,
+        // which does not survive being handed over as a plain object.
+        global: {
+          provide: {
+            ...form.vm.$.provides,
+            ...actionForm.vm.$.provides,
+          },
+        },
+      })
+      const databaseInput = input.findComponent({
+        name: 'DatabaseFormulaInput',
+      })
+      const before = databaseInput.vm.applicationContext
+
+      form.vm.localActions = [
+        { ...action, url: { formula: "'edited'", mode: 'simple' } },
+      ]
+      await form.vm.$nextTick()
+
+      expect(databaseInput.vm.applicationContext).toBe(before)
     })
 
     test('the injected input offers the clicked row fields', async () => {

@@ -1060,7 +1060,9 @@
   "dataProviderTypes": {
     "fieldsName": "Fields",
     "rowName": "Clicked row",
-    "rowId": "Row ID"
+    "rowId": "Row ID",
+    "previousActionName": "Previous action",
+    "previousActionRowId": "Id"
   },
   "userMentionInRichTextFieldNotification": {
     "title": "{sender} mentioned you in field {fieldName} of row {rowId} in {tableName}",
@@ -1279,10 +1281,15 @@
   },
   "fieldButtonSubForm": {
     "label": "Label",
-    "labelPlaceholder": "Open"
+    "labelPlaceholder": "Open",
+    "unresolvedReferenceTitle": "Action not saved",
+    "unresolvedReferenceMessage": "An action uses a result from an action that does not run before it. Move it back or remove the reference, then save again."
   },
   "databaseWorkflowActionType": {
-    "openUrl": "Open URL"
+    "openUrl": "Open URL",
+    "noUrl": "Enter a URL to open.",
+    "staleReference": "This action uses a result from an action that no longer runs before it.",
+    "unreadableReference": "This action uses a result from an action that no longer returns one."
   },
   "openUrlWorkflowActionForm": {
     "url": "URL",
@@ -1299,7 +1306,10 @@
     "actions": "Actions",
     "addAction": "Add action",
     "chooseAction": "Choose action...",
-    "searchActions": "Search actions"
+    "searchActions": "Search actions",
+    "misconfigured": "At least one action is misconfigured",
+    "toggleAction": "Show or hide this action",
+    "moveAction": "Move action, use the arrow keys to reorder"
   },
   "buttonField": {
     "dispatchErrorTitle": "Could not run the actions",

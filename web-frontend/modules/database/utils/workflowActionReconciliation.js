@@ -1,4 +1,5 @@
 import _ from 'lodash'
+import { referencedActionIds } from '@baserow/modules/database/utils/workflowActionFormulas'
 
 // Keys the API owns. Everything else is the type's own config.
 const API_OWNED_KEYS = ['id', 'type', 'order', 'field_id']
@@ -8,11 +9,35 @@ const API_OWNED_KEYS = ['id', 'type', 'order', 'field_id']
 export const CLIENT_ID_KEY = '_clientId'
 
 /**
+ * What identifies an action in the editor, saved or not. Its position cannot
+ * stand in for one: deleting the action above would hand its identity, and so
+ * its form state and any reference to it, to the one below.
+ */
+export function workflowActionKey(action) {
+  return action.id ?? action[CLIENT_ID_KEY]
+}
+
+/**
  * The type specific config of an action, without the keys the API owns. Used
  * both to diff two actions and to build the payload that persists one.
  */
 export function workflowActionConfig(action) {
   return _.omit(action, [...API_OWNED_KEYS, CLIENT_ID_KEY])
+}
+
+/**
+ * Every action this one's formulas reference. The same keys as
+ * `workflowActionConfig`, walked where they are: `_.omit` deep copies what it
+ * keeps, which on a wide table is the whole saved schema, and this only reads.
+ */
+export function referencedActionIdsInConfig(action) {
+  const found = new Set()
+  Object.entries(action).forEach(([key, value]) => {
+    if (!API_OWNED_KEYS.includes(key) && key !== CLIENT_ID_KEY) {
+      referencedActionIds(value, found)
+    }
+  })
+  return [...found]
 }
 
 /**
@@ -48,9 +73,11 @@ export function reconcileWorkflowActions(serverActions, localActions) {
       action.id == null ? undefined : serverById.get(action.id)
 
     if (serverAction === undefined) {
-      // No id, or one the server no longer knows: treat as new and strip it.
-      const { id, ...withoutId } = action
-      toCreate.push(withoutId)
+      // No id, or one the server no longer knows: treat as new. The id it had
+      // is kept rather than stripped, because the actions after it name it by
+      // that id and have to follow it to the one it is created under. It never
+      // reaches the API: `workflowActionConfig` leaves it out of the payload.
+      toCreate.push(action)
       order.push(null)
       return
     }

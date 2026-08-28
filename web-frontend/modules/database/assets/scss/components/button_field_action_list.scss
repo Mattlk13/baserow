@@ -23,11 +23,19 @@
   @include rounded($rounded-md);
 }
 
-// Holds the drag handle, the type dropdown and the delete button.
+// Holds the drag handle, the type dropdown, the delete button and the
+// expand arrow. Clicking anywhere else on it toggles the card.
 .button-field-action-list__header {
   display: flex;
   align-items: center;
   padding: 12px 16px;
+  cursor: pointer;
+}
+
+.button-field-action-list__toggle {
+  margin-left: 8px;
+  color: $palette-neutral-700;
+  font-size: 16px;
 }
 
 // A dot grid drawn with a gradient, the way the builder draws its handles.
@@ -69,4 +77,13 @@
 // Scoped to the card, since SegmentControl is shared with other modules.
 .button-field-action-list__item .segment-control {
   background: $palette-neutral-200;
+}
+
+.button-field-action-list__error {
+  // These are full sentences, and the popup has no max-width of its own, so
+  // one line would either stretch it or clip the message with no way back.
+  max-width: 366px;
+  color: $palette-red-600;
+  font-size: 12px;
+  padding: 0 12px 8px;
 }

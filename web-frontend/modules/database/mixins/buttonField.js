@@ -48,7 +48,11 @@ export default {
           this.field.id,
           this.row.id
         )
-        await this.runClientActions(data?.client_actions || [], clickedRow)
+        await this.runClientActions(
+          data?.client_actions || [],
+          clickedRow,
+          this.previousActionResults(data)
+        )
       } catch (error) {
         // A handled error already carries its own message. Anything else, a
         // network failure for instance, still needs a toast of its own.
@@ -65,22 +69,80 @@ export default {
       }
     },
     /**
+     * What the server side actions returned, for a client action to reference.
+     * The result is keyed by field name, so the ids it came with travel with
+     * it: the browser has no other way to map a `field_<id>` in a formula onto
+     * a row of a table that is not this one.
+     */
+    previousActionResults(data) {
+      return Object.fromEntries(
+        (data?.results || []).map((result) => [
+          String(result.workflow_action_id),
+          {
+            data: result.data,
+            fieldNames: result.field_names || {},
+            order: result.order,
+            position: result.position,
+          },
+        ])
+      )
+    },
+    /**
+     * The results of the actions that ran before this one. Client actions run
+     * last whatever their place in the list, so without this a reference to an
+     * action ordered after them would resolve here while the dispatch would
+     * have refused it.
+     */
+    resultsBefore(previousActionResults, workflowAction) {
+      // Two actions can carry the same `order`, which the dispatch then breaks
+      // by id, so `position` is what really says which ran first. `order` is
+      // the fallback for a backend that sends no position.
+      const byPosition =
+        workflowAction.position !== undefined &&
+        workflowAction.position !== null
+      const place = byPosition ? workflowAction.position : workflowAction.order
+      if (place === undefined || place === null) {
+        return previousActionResults
+      }
+      return Object.fromEntries(
+        Object.entries(previousActionResults).filter(([, result]) => {
+          const resultPlace = byPosition ? result.position : result.order
+          return resultPlace === undefined || resultPlace === null
+            ? true
+            : resultPlace < place
+        })
+      )
+    },
+    /**
      * Runs the actions the backend hands back for the browser, in the order it
      * returned them. It only sends them when every server side action
      * succeeded, so a failed row action never navigates away.
      */
-    async runClientActions(clientActions, row) {
+    async runClientActions(clientActions, row, previousActionResults = {}) {
       const fields =
         this.allFieldsInTable?.length > 0
           ? this.allFieldsInTable
           : this.$store.getters['field/getAll']
       for (const workflowAction of clientActions) {
-        await this.$registry
+        const ran = await this.$registry
           .get('databaseWorkflowActionType', workflowAction.type)
           .execute({
             workflowAction,
-            applicationContext: { row, fields },
+            applicationContext: {
+              row,
+              fields,
+              previousActionResults: this.resultsBefore(
+                previousActionResults,
+                workflowAction
+              ),
+            },
           })
+        // An action that could not run stops the ones after it, the way a
+        // failed server action stops the sequence. Carrying on would navigate
+        // away from the message this one just raised.
+        if (ran === false) {
+          break
+        }
       }
     },
   },

@@ -246,4 +246,208 @@ describe('field contexts keep has_workflow_actions in sync', () => {
       true
     )
   })
+
+  /**
+   * Creating the field and saving its actions are two calls, so the second can
+   * fail on a field that exists. Closing on that would discard the whole
+   * configuration the user just typed.
+   */
+  describe('a creation whose actions fail', () => {
+    const createWithFailingActions = async () => {
+      const wrapper = await mountContext(CreateFieldContext, {
+        table,
+        view,
+        allFieldsInTable,
+        database,
+      })
+      client.post.mockResolvedValue({ data: buttonField() })
+      client.patch.mockResolvedValue({ data: buttonField() })
+      // Shaped like an API error, which `notifyIf` turns into a toast rather
+      // than re-throwing.
+      actionSaveError = { handler: { notifyIf: vi.fn() } }
+
+      await wrapper.vm.submit({ name: 'Go', type: 'button', label: 'Go' })
+      await wrapper.emitted('field-created')[0][0].callback()
+      return wrapper
+    }
+
+    test('keeps the editor open on the edits', async () => {
+      const wrapper = await createWithFailingActions()
+
+      expect(wrapper.vm.createdField.id).toBe(7)
+      expect(wrapper.vm.loading).toBe(false)
+      // Without this the form checks its name against the field it just made.
+      expect(wrapper.vm.defaultValues.id).toBe(7)
+      expect(wrapper.emitted('field-created-callback-done')).toBeUndefined()
+      // The field itself did save, so the view still has to hear about it.
+      expect(testApp.store.getters['field/get'](7)).toBeTruthy()
+    })
+
+    test('saves a retry against that field rather than a second one', async () => {
+      const wrapper = await createWithFailingActions()
+      const hide = vi.spyOn(wrapper.vm, 'hide')
+      actionSaveError = null
+
+      await wrapper.vm.submit({ name: 'Go', type: 'button', label: 'Go' })
+      // The parent refreshes its rows first, then runs the callback.
+      await wrapper.emitted('field-created')[1][0].callback()
+
+      expect(client.post).toHaveBeenCalledTimes(1)
+      expect(client.patch).toHaveBeenCalledWith(
+        '/database/fields/7/',
+        expect.objectContaining({ name: 'Go', type: 'button' }),
+        expect.anything()
+      )
+      expect(hide).toHaveBeenCalled()
+      expect(wrapper.vm.createdField).toBe(null)
+      expect(wrapper.emitted('field-created-callback-done')).toHaveLength(1)
+    })
+
+    test('reports the retried field as it stands afterwards', async () => {
+      const wrapper = await createWithFailingActions()
+      actionSaveError = null
+      client.patch.mockResolvedValue({ data: buttonField({ name: 'Renamed' }) })
+
+      await wrapper.vm.submit({ name: 'Renamed', type: 'button', label: 'Go' })
+      await wrapper.emitted('field-created')[1][0].callback()
+
+      const done = wrapper.emitted('field-created-callback-done')
+      expect(done).toHaveLength(1)
+      // The copy taken when the field was made still calls it "Go".
+      expect(done[0][0].newField.name).toBe('Renamed')
+    })
+
+    test('the retry patch is part of the create group', async () => {
+      // Undo works on the group, so a patch outside it leaves the create to be
+      // undone on its own: the field is trashed and the patch has nothing left
+      // to undo.
+      const wrapper = await createWithFailingActions()
+      const created = client.post.mock.calls[0][2]
+      actionSaveError = null
+
+      await wrapper.vm.submit({ name: 'Go', type: 'button', label: 'Go' })
+
+      const patched = client.patch.mock.calls[0][2]
+      expect(created.headers.ClientUndoRedoActionGroupId).toBeTruthy()
+      expect(patched?.headers?.ClientUndoRedoActionGroupId).toBe(
+        created.headers.ClientUndoRedoActionGroupId
+      )
+    })
+
+    test('the retry lets the parent refresh its rows first', async () => {
+      // The create path hands the parent a callback so the rows are refreshed
+      // before the field is committed. A retry that changes the type needs the
+      // same, or the rows are read against the wrong column.
+      const wrapper = await createWithFailingActions()
+      actionSaveError = null
+
+      await wrapper.vm.submit({ name: 'Go', type: 'button', label: 'Go' })
+
+      const created = wrapper.emitted('field-created')
+      expect(created).toHaveLength(2)
+      // Nothing is finished until the parent runs the callback.
+      expect(wrapper.emitted('field-created-callback-done')).toBeUndefined()
+
+      await created[1][0].callback()
+
+      expect(wrapper.emitted('field-created-callback-done')).toHaveLength(1)
+    })
+
+    test('dismissing a retry in flight reports the field once', async () => {
+      const wrapper = await createWithFailingActions()
+      actionSaveError = null
+      let releasePatch = null
+      client.patch.mockReturnValue(
+        new Promise((resolve) => {
+          releasePatch = () => resolve({ data: buttonField() })
+        })
+      )
+
+      const retrying = wrapper.vm.submit({
+        name: 'Go',
+        type: 'button',
+        label: 'Go',
+      })
+      wrapper.vm.hide()
+      releasePatch()
+      await retrying
+      const created = wrapper.emitted('field-created')
+      await created[created.length - 1][0].callback()
+
+      expect(wrapper.emitted('field-created-callback-done')).toHaveLength(1)
+    })
+
+    test('reports the field once the retry is abandoned', async () => {
+      const wrapper = await createWithFailingActions()
+
+      wrapper.vm.hide()
+
+      const done = wrapper.emitted('field-created-callback-done')
+      expect(done).toHaveLength(1)
+      expect(done[0][0].newField.id).toBe(7)
+      expect(wrapper.vm.createdField).toBe(null)
+      expect(wrapper.vm.defaultValues.id).toBeUndefined()
+    })
+
+    test('dismissing a retry that then fails still reports the field', async () => {
+      // `@hidden` fires while the retry runs and does not fire again. The
+      // retry failing reports nothing either, so without the close being held
+      // the field is never handed over and the context stays on it: the next
+      // create would patch this field instead of making a new one.
+      const wrapper = await createWithFailingActions()
+      let releasePatch = null
+      client.patch.mockReturnValue(
+        new Promise((resolve) => {
+          releasePatch = () => resolve({ data: buttonField() })
+        })
+      )
+
+      const retrying = wrapper.vm.submit({
+        name: 'Go',
+        type: 'button',
+        label: 'Go',
+      })
+      wrapper.vm.hide()
+      releasePatch()
+      await retrying
+      const created = wrapper.emitted('field-created')
+      await created[created.length - 1][0].callback()
+
+      expect(wrapper.emitted('field-created-callback-done')).toHaveLength(1)
+      expect(wrapper.vm.createdField).toBe(null)
+      expect(wrapper.vm.defaultValues.id).toBeUndefined()
+    })
+
+    test('dismissing a create whose actions fail still reports the field', async () => {
+      // The same window on the first attempt: the field is made, the actions
+      // are not, and the close lands before the callback settles it.
+      const wrapper = await mountContext(CreateFieldContext, {
+        table,
+        view,
+        allFieldsInTable,
+        database,
+      })
+      let releasePost = null
+      client.post.mockReturnValue(
+        new Promise((resolve) => {
+          releasePost = () => resolve({ data: buttonField() })
+        })
+      )
+      actionSaveError = { handler: { notifyIf: vi.fn() } }
+
+      const creating = wrapper.vm.submit({
+        name: 'Go',
+        type: 'button',
+        label: 'Go',
+      })
+      wrapper.vm.hide()
+      releasePost()
+      await creating
+      await wrapper.emitted('field-created')[0][0].callback()
+
+      expect(wrapper.emitted('field-created-callback-done')).toHaveLength(1)
+      expect(wrapper.vm.createdField).toBe(null)
+      expect(wrapper.vm.defaultValues.id).toBeUndefined()
+    })
+  })
 })

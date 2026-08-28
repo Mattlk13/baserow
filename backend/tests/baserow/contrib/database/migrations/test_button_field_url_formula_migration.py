@@ -1,4 +1,4 @@
-from django.apps import apps
+# noinspection PyPep8Naming
 from django.db import connection
 
 import pytest
@@ -6,10 +6,19 @@ import pytest
 from baserow.contrib.database.migrations.helpers.migrate_button_url_formula_to_open_url_action import (  # noqa: E501
     migrate_button_url_formulas_to_open_url_actions,
 )
-from baserow.contrib.database.workflow_actions.models import OpenUrlWorkflowAction
+
+# The shape the formula column stores: the formula, its mode, and the version.
+ADVANCED = '{"f": "\'https://advanced.test\'", "m": "advanced", "v": "0.1"}'
+SIMPLE = '{"f": "\'https://simple.test\'", "m": "simple", "v": "0.1"}'
+# Rows written before the column held JSON keep a bare string.
+BARE = "'https://bare.test'"
+EMPTY = '{"f": "", "m": "simple", "v": "0.1"}'
+# The keys come out in a different order depending on whether the column was
+# written from a string or from a dict.
+EMPTY_REVERSED = '{"m": "simple", "v": "0.1", "f": ""}'
 
 
-def set_raw_url_formula(button_field, raw_value):
+def set_raw_url_formula(field_id, raw_value):
     """
     Writes straight past the field's serialisation, so the column can hold a
     shape the ORM would never write itself.
@@ -18,79 +27,115 @@ def set_raw_url_formula(button_field, raw_value):
     with connection.cursor() as cursor:
         cursor.execute(
             "UPDATE database_buttonfield SET url_formula = %s WHERE field_ptr_id = %s",
-            [raw_value, button_field.id],
+            [raw_value, field_id],
         )
 
 
-@pytest.mark.django_db
-def test_url_formula_becomes_an_open_url_action(data_fixture):
-    table = data_fixture.create_database_table()
-    button_field = data_fixture.create_button_field(
-        table=table,
-        name="btn",
-        url_formula={"formula": "'https://example.com'", "mode": "advanced"},
+def url_formula_column_exists():
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'database_buttonfield' "
+            "AND column_name = 'url_formula'"
+        )
+        return cursor.fetchone() is not None
+
+
+@pytest.mark.once_per_day_in_ci
+def test_url_formulas_become_open_url_actions(migrator, teardown_table_metadata):
+    """
+    The upgrade path a button field takes: 0216 moves every `url_formula` into
+    an `open_url` action, and only then does 0217 drop the column.
+    """
+
+    migrate_from = [
+        ("database", "0215_view_public_id_index"),
+        ("core", "0115_ai_provider"),
+    ]
+    migrate_moved = [
+        ("database", "0216_databaseworkflowaction_createrowworkflowaction_and_more")
+    ]
+    migrate_to = [("database", "0217_remove_buttonfield_url_formula")]
+
+    old_state = migrator.migrate(migrate_from)
+
+    ContentType = old_state.apps.get_model("contenttypes", "ContentType")
+    Workspace = old_state.apps.get_model("core", "Workspace")
+    Database = old_state.apps.get_model("database", "Database")
+    Table = old_state.apps.get_model("database", "Table")
+    ButtonField = old_state.apps.get_model("database", "ButtonField")
+
+    assert url_formula_column_exists()
+
+    workspace = Workspace.objects.create(name="workspace")
+    database = Database.objects.create(
+        content_type=ContentType.objects.get_for_model(Database),
+        order=1,
+        name="database",
+        workspace_id=workspace.id,
+        trashed=False,
+    )
+    table = Table.objects.create(
+        database_id=database.id, name="table", order=1, trashed=False
+    )
+    button_content_type_id = ContentType.objects.get_for_model(ButtonField).id
+
+    def button(name, raw_value):
+        field = ButtonField.objects.create(
+            table_id=table.id,
+            name=name,
+            order=1,
+            content_type_id=button_content_type_id,
+            label="Go",
+        )
+        set_raw_url_formula(field.field_ptr_id, raw_value)
+        return field.field_ptr_id
+
+    advanced = button("advanced", ADVANCED)
+    simple = button("simple", SIMPLE)
+    bare = button("bare", BARE)
+    empty = button("empty", EMPTY)
+    empty_reversed = button("empty_reversed", EMPTY_REVERSED)
+    blank = button("blank", "")
+    null = button("null", None)
+
+    moved_state = migrator.migrate(migrate_moved)
+
+    # Re-running the move must not stack a second action on a field, which a
+    # re-applied migration or a repaired deploy does.
+    migrate_button_url_formulas_to_open_url_actions(moved_state.apps, None)
+
+    Moved = moved_state.apps.get_model("database", "OpenUrlWorkflowAction")
+    assert Moved.objects.count() == 3
+    assert Moved.objects.filter(field_id=advanced).count() == 1
+
+    new_state = migrator.migrate(migrate_to)
+
+    OpenUrlWorkflowAction = new_state.apps.get_model(
+        "database", "OpenUrlWorkflowAction"
     )
 
-    migrate_button_url_formulas_to_open_url_actions(apps, None)
-
-    action = OpenUrlWorkflowAction.objects.get(field_id=button_field.id)
-    assert action.order == 1
+    action = OpenUrlWorkflowAction.objects.get(field_id=advanced)
+    assert action.url["formula"] == "'https://advanced.test'"
+    # A raw formula downgraded to simple stops resolving entirely.
+    assert action.url["mode"] == "advanced"
     # `url_formula` always opened a new tab, so the action keeps doing that
     # rather than taking the "self" default.
     assert action.target == "blank"
-    assert action.url["formula"] == "'https://example.com'"
-    # The mode has to survive too: a raw formula downgraded to simple stops
-    # resolving entirely.
-    assert action.url["mode"] == "advanced"
-    assert action.content_type.model == "openurlworkflowaction"
+    assert action.order == 1
 
-
-@pytest.mark.django_db
-def test_a_legacy_bare_string_url_formula_becomes_an_open_url_action(data_fixture):
-    table = data_fixture.create_database_table()
-    button_field = data_fixture.create_button_field(table=table, name="btn")
-    # Rows written before the formula column held JSON keep a bare string.
-    set_raw_url_formula(button_field, "'https://example.com'")
-
-    migrate_button_url_formulas_to_open_url_actions(apps, None)
-
-    action = OpenUrlWorkflowAction.objects.get(field_id=button_field.id)
-    assert action.url["formula"] == "'https://example.com'"
-    assert action.target == "blank"
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    "raw_value",
-    [
-        # A NULL column, plus both key orderings of an empty formula: the order
-        # differs depending on whether it was stored from a string or a dict.
-        None,
-        "",
-        '{"f": "", "m": "simple", "v": "0.1"}',
-        '{"m": "simple", "v": "0.1", "f": ""}',
-    ],
-)
-def test_button_without_a_url_formula_gets_no_action(data_fixture, raw_value):
-    table = data_fixture.create_database_table()
-    button_field = data_fixture.create_button_field(table=table, name="btn")
-    set_raw_url_formula(button_field, raw_value)
-
-    migrate_button_url_formulas_to_open_url_actions(apps, None)
-
-    assert not OpenUrlWorkflowAction.objects.filter(field_id=button_field.id).exists()
-
-
-@pytest.mark.django_db
-def test_running_twice_does_not_stack_a_second_action(data_fixture):
-    table = data_fixture.create_database_table()
-    button_field = data_fixture.create_button_field(
-        table=table,
-        name="btn",
-        url_formula={"formula": "'https://example.com'", "mode": "simple"},
+    kept = OpenUrlWorkflowAction.objects.get(field_id=simple)
+    assert kept.url["formula"] == "'https://simple.test'"
+    assert kept.url["mode"] == "simple"
+    assert (
+        OpenUrlWorkflowAction.objects.get(field_id=bare).url["formula"]
+        == "'https://bare.test'"
     )
 
-    migrate_button_url_formulas_to_open_url_actions(apps, None)
-    migrate_button_url_formulas_to_open_url_actions(apps, None)
+    # A button that opened nothing has nothing to run.
+    assert not OpenUrlWorkflowAction.objects.filter(
+        field_id__in=[empty, empty_reversed, blank, null]
+    ).exists()
 
-    assert OpenUrlWorkflowAction.objects.filter(field_id=button_field.id).count() == 1
+    # Only once every formula has been moved is the column dropped.
+    assert not url_formula_column_exists()

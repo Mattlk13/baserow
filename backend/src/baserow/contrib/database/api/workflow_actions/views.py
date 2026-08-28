@@ -33,6 +33,7 @@ from baserow.contrib.database.api.workflow_actions.errors import (
 from baserow.contrib.database.api.workflow_actions.serializers import (
     CreateDatabaseWorkflowActionSerializer,
     DatabaseWorkflowActionSerializer,
+    DispatchedClientActionSerializer,
     DispatchWorkflowActionsResponseSerializer,
     DispatchWorkflowActionsSerializer,
     OrderWorkflowActionsSerializer,
@@ -425,13 +426,31 @@ class DispatchDatabaseWorkflowActionsView(APIView):
             request.user, field, row
         )
 
+        # Nothing reads the names unless a client action runs. An action that
+        # returned no row, a delete for instance, has none to give either.
+        names_wanted = bool(dispatch.client_actions)
+
+        def field_names_for(dispatched):
+            if not names_wanted or not isinstance(dispatched.result.data, dict):
+                return {}
+            workflow_action = dispatched.workflow_action
+            return workflow_action.get_type().get_result_field_names(workflow_action)
+
         results = [
             {
                 "workflow_action_id": dispatched.workflow_action.id,
+                # The browser only lets a client action read what ran before
+                # it, and it has no other way to tell where an action sat.
+                # `order` is what the action carries; `position` is where it
+                # really ran, which is what two actions sharing an `order` are
+                # told apart by.
+                "order": dispatched.workflow_action.order,
+                "position": dispatch.positions.get(dispatched.workflow_action.id),
                 # Every action runs synchronously inside the request. The field
                 # is here so an async one can report "dispatched" later.
                 "status": "completed",
                 "data": dispatched.result.data,
+                "field_names": field_names_for(dispatched),
             }
             for dispatched in dispatch.dispatched
         ]
@@ -442,8 +461,14 @@ class DispatchDatabaseWorkflowActionsView(APIView):
                 "client_actions": [
                     database_workflow_action_type_registry.get_serializer(
                         workflow_action,
-                        DatabaseWorkflowActionSerializer,
-                        context={"user": request.user},
+                        DispatchedClientActionSerializer,
+                        # The position is on the same scale as a result's, so
+                        # the browser can tell which results ran before this
+                        # action.
+                        context={
+                            "user": request.user,
+                            "positions": dispatch.positions,
+                        },
                     ).data
                     for workflow_action in dispatch.client_actions
                 ],

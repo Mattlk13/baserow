@@ -11,7 +11,79 @@ import RuntimeFormulaContext from '@baserow/modules/core/runtimeFormulaContext'
 import {
   encodeUrlWhitespace,
   urlWithAllowedProtocol,
+  FIELDS_UNAVAILABLE,
 } from '@baserow/modules/database/utils/buttonField'
+import {
+  referencedActionIdsInConfig,
+  workflowActionKey,
+} from '@baserow/modules/database/utils/workflowActionReconciliation'
+
+// A single select, link row, file or collaborator value. A Date is not one:
+// it stringifies to something a URL can carry.
+const isComposite = (value) =>
+  value !== null && typeof value === 'object' && !(value instanceof Date)
+
+// What the backend's own schema calls these, taken from a generated one rather
+// than guessed. Only the shapes that change how a node renders are worth
+// deriving: an array or an object can have children, everything else is a leaf.
+// A number field really is a string, since the API returns it as one.
+const JSON_TYPE_BY_FIELD_TYPE = {
+  boolean: 'boolean',
+  single_select: 'object',
+  file: 'array',
+  link_row: 'array',
+  multiple_select: 'array',
+  multiple_collaborators: 'array',
+}
+
+/**
+ * Whether an action can be read by a later one. A type that returns nothing
+ * contributes no node to the data explorer, and the dispatch fails the whole
+ * click on a reference to one, so changing an action's type breaks every
+ * reference to it just as moving it does.
+ */
+function producesResult(app, action) {
+  if (!action?.type) {
+    return false
+  }
+  return (
+    app.$registry.get('databaseWorkflowActionType', action.type)
+      .producesResult === true
+  )
+}
+
+/**
+ * Whether an action references one that no longer precedes it or no longer
+ * returns anything, which a reorder, a delete or a type change can leave
+ * behind. The reference is kept rather than cleared, so putting the other
+ * action back makes it valid again.
+ */
+function staleReferenceError(app, workflowAction, applicationContext) {
+  const actions = applicationContext?.workflowActions
+  if (!Array.isArray(actions)) {
+    return null
+  }
+  const index = actions.findIndex(
+    (action) => workflowActionKey(action) === workflowActionKey(workflowAction)
+  )
+  if (index === -1) {
+    return null
+  }
+  const before = new Map(
+    actions
+      .slice(0, index)
+      .map((action) => [String(workflowActionKey(action)), action])
+  )
+  const referenced = referencedActionIdsInConfig(workflowAction).map(String)
+
+  if (referenced.some((id) => !before.has(id))) {
+    return app.$i18n.t('databaseWorkflowActionType.staleReference')
+  }
+  if (referenced.some((id) => !producesResult(app, before.get(id)))) {
+    return app.$i18n.t('databaseWorkflowActionType.unreadableReference')
+  }
+  return null
+}
 
 /**
  * Base for a database workflow action backed by a service. No `execute`: a
@@ -35,6 +107,13 @@ export class DatabaseWorkflowActionServiceType extends WorkflowActionType {
   }
 
   /**
+   * A row action returns the row it wrote, which a later action can read.
+   */
+  get producesResult() {
+    return true
+  }
+
+  /**
    * Whether the form offers field mappings, and so needs the target table's
    * fields fetched for it.
    */
@@ -46,8 +125,115 @@ export class DatabaseWorkflowActionServiceType extends WorkflowActionType {
     return { workflowAction, database }
   }
 
+  getErrorMessage(workflowAction, applicationContext) {
+    const inherited = super.getErrorMessage(workflowAction, applicationContext)
+    if (inherited) {
+      return inherited
+    }
+    const serviceError = this.serviceType.getErrorMessage({
+      service: workflowAction.service,
+    })
+    if (serviceError) {
+      return serviceError
+    }
+    return staleReferenceError(this.app, workflowAction, applicationContext)
+  }
+
   getNewActionValues() {
     return { service: {} }
+  }
+
+  /**
+   * Describes the row this action returns, so a later action can reference it.
+   *
+   * Derived from the target table's fields, which the action forms report up
+   * to the sub-form, and filled out per field from the schema the backend
+   * built for a saved action, which knows what a composite field contains.
+   */
+  getDataSchema(applicationContext, workflowAction) {
+    const service = workflowAction.service
+    const fields = applicationContext?.tableFields?.[service?.table_id]
+    const savedProperties = service?.schema?.properties
+
+    // A fetch that failed says the saved schema cannot be trusted either, since
+    // it describes whichever table the action pointed at when it was saved.
+    if (fields === FIELDS_UNAVAILABLE) {
+      return {
+        type: 'object',
+        title: this.label,
+        properties: { id: this.rowIdProperty },
+      }
+    }
+
+    // Which fields exist is the fetched list's to say, since the saved schema
+    // describes whichever table the action pointed at when it was last saved
+    // and the editor buffers a table change without clearing it. Until that
+    // fetch lands the saved schema is all there is.
+    if (!fields) {
+      const saved = service?.schema
+      if (saved?.properties) {
+        return {
+          ...saved,
+          title: this.label,
+          properties: this.withoutWriteOnly(saved.properties),
+        }
+      }
+      return null
+    }
+
+    return {
+      type: 'object',
+      title: this.label,
+      properties: {
+        id: this.rowIdProperty,
+        ...Object.fromEntries(
+          fields
+            .filter((field) => !this.isWriteOnly(field))
+            .map((field) => {
+              const key = `field_${field.id}`
+              // Field ids are unique across tables, so a repointed action
+              // matches nothing of the table it used to write to.
+              return [
+                key,
+                {
+                  type: JSON_TYPE_BY_FIELD_TYPE[field.type] ?? 'string',
+                  ...savedProperties?.[key],
+                  title: field.name,
+                  metadata: field,
+                },
+              ]
+            })
+        ),
+      },
+    }
+  }
+
+  /**
+   * "Id", matching the schema the backend builds, so the node does not rename
+   * itself the first time the action is saved.
+   */
+  get rowIdProperty() {
+    return {
+      type: 'number',
+      title: this.app.$i18n.t('dataProviderTypes.previousActionRowId'),
+    }
+  }
+
+  isWriteOnly(field) {
+    return this.app.$registry.get('field', field.type).isWriteOnlyField(field)
+  }
+
+  /**
+   * The dispatch refuses to read a write only field, so offering one would
+   * only build a formula that fails on click.
+   */
+  withoutWriteOnly(properties) {
+    return Object.fromEntries(
+      Object.entries(properties).filter(
+        ([, property]) =>
+          !property.metadata?.type || !this.isWriteOnly(property.metadata)
+      )
+    )
   }
 }
 
@@ -84,6 +270,29 @@ export class OpenUrlWorkflowActionType extends WorkflowActionType {
   }
 
   /**
+   * Opening a URL produces nothing later actions can read, so it contributes
+   * no node to the data explorer.
+   */
+  getDataSchema() {
+    return null
+  }
+
+  get producesResult() {
+    return false
+  }
+
+  getErrorMessage(workflowAction, applicationContext) {
+    const inherited = super.getErrorMessage(workflowAction, applicationContext)
+    if (inherited) {
+      return inherited
+    }
+    if (!workflowAction.url?.formula) {
+      return this.app.$i18n.t('databaseWorkflowActionType.noUrl')
+    }
+    return staleReferenceError(this.app, workflowAction, applicationContext)
+  }
+
+  /**
    * Nothing to seed: the form emits its own defaults on mount.
    */
   getNewActionValues() {
@@ -91,25 +300,43 @@ export class OpenUrlWorkflowActionType extends WorkflowActionType {
   }
 
   /**
-   * Resolves the action's URL formula for the clicked row.
+   * Resolves the action's URL formula against the clicked row and what the
+   * actions before it returned.
    *
-   * Only the `fields` provider is offered: it stringifies every value, which
-   * is what a URL needs. `row` returns raw types and is for action arguments
-   * (ADR 006 section 4). A resolution failure comes back as an empty string.
+   * `fields` stringifies every value, which is what a URL needs; `row` returns
+   * raw types and is for action arguments (ADR 006 section 4). A previous
+   * action's result is raw too, so a composite value is refused rather than
+   * stringified. A formula that resolves to nothing comes back as an empty
+   * string; one that throws is left to `execute`, which reports it.
    */
-  resolveUrl(workflowAction, { row, fields }) {
+  resolveUrl(workflowAction, { row, fields, previousActionResults = {} }) {
     const formulaObject = workflowAction.url
     if (!formulaObject?.formula) {
       return ''
     }
     const dataProviders = {
       fields: this.app.$registry.get('databaseDataProvider', 'fields'),
+      previous_action: this.app.$registry.get(
+        'databaseDataProvider',
+        'previous_action'
+      ),
     }
     const runtimeFormulaContext = new Proxy(
-      new RuntimeFormulaContext(dataProviders, { row, fields }),
+      new RuntimeFormulaContext(dataProviders, {
+        row,
+        fields,
+        previousActionResults,
+      }),
       {
         get(target, prop) {
-          return target.get(prop)
+          const value = target.get(prop)
+          // A previous action's result is raw, so a single select, link row or
+          // file is an object. Stringified it builds a URL out of JSON, which
+          // `urlWithAllowedProtocol` then takes for a relative one.
+          if (isComposite(value)) {
+            throw new Error(`${prop} is not a value a URL can be built from.`)
+          }
+          return value
         },
       }
     )
@@ -124,6 +351,11 @@ export class OpenUrlWorkflowActionType extends WorkflowActionType {
     return encodeUrlWhitespace(`${resolved}`.trim())
   }
 
+  /**
+   * @returns {Promise<Boolean>} Whether the action ran. `false` stops the
+   *   client actions after it, which would otherwise navigate away from the
+   *   message this one just raised.
+   */
   async execute({ workflowAction, applicationContext }) {
     let url
     try {
@@ -143,7 +375,7 @@ export class OpenUrlWorkflowActionType extends WorkflowActionType {
         title: this.app.$i18n.t('openUrlWorkflowAction.invalidUrlTitle'),
         message: this.app.$i18n.t('openUrlWorkflowAction.invalidUrlMessage'),
       })
-      return
+      return false
     }
 
     if (workflowAction.target === 'blank') {
@@ -151,6 +383,7 @@ export class OpenUrlWorkflowActionType extends WorkflowActionType {
     } else {
       window.location.href = url
     }
+    return true
   }
 }
 
@@ -203,6 +436,17 @@ export class LocalBaserowDeleteRowWorkflowActionType extends DatabaseWorkflowAct
 
   getOrder() {
     return 30
+  }
+
+  /**
+   * The row is gone, so there is nothing for a later action to read.
+   */
+  getDataSchema() {
+    return null
+  }
+
+  get producesResult() {
+    return false
   }
 
   get serviceType() {

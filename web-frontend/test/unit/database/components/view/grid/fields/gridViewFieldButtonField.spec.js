@@ -95,6 +95,7 @@ describe('GridViewFieldButtonField', () => {
       applicationContext: {
         row: { id: 1, field_1: 'ada' },
         fields: [{ id: 1, type: 'text', name: 'Slug' }, field],
+        previousActionResults: {},
       },
     })
   })
@@ -132,6 +133,31 @@ describe('GridViewFieldButtonField', () => {
     expect(execute.mock.calls.map((call) => call[0].workflowAction.id)).toEqual(
       [1, 2]
     )
+  })
+
+  test('a client action that could not run stops the ones after it', async () => {
+    // The real `execute` here, not a mock: a refused URL has to report itself
+    // as not run, or the action after it navigates away and takes the message
+    // with it.
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const refused = {
+      ...openUrlAction,
+      url: { formula: "'javascript:alert(1)'", mode: 'simple', version: 1 },
+    }
+    const second = { ...openUrlAction, id: 2 }
+    const wrapper = await mountCell({}, { client_actions: [refused, second] })
+    const dispatch = vi.spyOn(testApp.store, 'dispatch')
+
+    await wrapper.find('button').trigger('click')
+    await flushPromises()
+
+    expect(dispatch).toHaveBeenCalledWith(
+      'toast/error',
+      expect.objectContaining({
+        title: 'openUrlWorkflowAction.invalidUrlTitle',
+      })
+    )
+    expect(open).not.toHaveBeenCalled()
   })
 
   test('waits for a client action to settle before running the next one', async () => {

@@ -102,7 +102,126 @@ describe('RowEditFieldButtonField', () => {
 
     expect(execute).toHaveBeenCalledWith({
       workflowAction: action,
-      applicationContext: { row: { id: 11 }, fields: [field] },
+      applicationContext: {
+        row: { id: 11 },
+        fields: [field],
+        previousActionResults: {},
+      },
+    })
+  })
+
+  test('a client action is given what the server actions returned', async () => {
+    const execute = vi.spyOn(openUrlType, 'execute').mockResolvedValue()
+    const action = {
+      id: 2,
+      type: 'open_url',
+      url: { formula: "'https://example.com'", mode: 'simple', version: 1 },
+      target: 'self',
+    }
+    client.post.mockResolvedValue({
+      data: {
+        results: [
+          {
+            workflow_action_id: 1,
+            status: 'completed',
+            data: { id: 99, Name: 'Ada' },
+            field_names: { field_10: 'Name' },
+          },
+        ],
+        client_actions: [action],
+      },
+    })
+    const wrapper = await mountField()
+
+    await wrapper.find('button').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    // Keyed as a string, the way a formula path carries the id.
+    expect(
+      execute.mock.calls[0][0].applicationContext.previousActionResults
+    ).toEqual({
+      1: { data: { id: 99, Name: 'Ada' }, fieldNames: { field_10: 'Name' } },
+    })
+  })
+
+  test('a client action cannot read a result from an action ordered after it', async () => {
+    // Client actions always run last, so every server result is in the
+    // response. Only the ones the clicker put before it may be read, or the
+    // browser would resolve what the dispatch refuses.
+    const execute = vi.spyOn(openUrlType, 'execute').mockResolvedValue()
+    const action = {
+      id: 2,
+      order: 1,
+      type: 'open_url',
+      url: { formula: "'https://example.com'", mode: 'simple', version: 1 },
+      target: 'self',
+    }
+    client.post.mockResolvedValue({
+      data: {
+        results: [
+          {
+            workflow_action_id: 1,
+            order: 2,
+            status: 'completed',
+            data: { id: 99, Name: 'Ada' },
+            field_names: { field_10: 'Name' },
+          },
+        ],
+        client_actions: [action],
+      },
+    })
+    const wrapper = await mountField()
+
+    await wrapper.find('button').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(
+      execute.mock.calls[0][0].applicationContext.previousActionResults
+    ).toEqual({})
+  })
+
+  test('a client action reads a result that shares its order', async () => {
+    // Two actions created at once can be given the same `order`, which the
+    // dispatch then breaks by id. Comparing the orders alone would drop the
+    // earlier result, and the client action would fail on a valid reference.
+    const execute = vi.spyOn(openUrlType, 'execute').mockResolvedValue()
+    const action = {
+      id: 2,
+      order: 1,
+      position: 2,
+      type: 'open_url',
+      url: { formula: "'https://example.com'", mode: 'simple', version: 1 },
+      target: 'self',
+    }
+    client.post.mockResolvedValue({
+      data: {
+        results: [
+          {
+            workflow_action_id: 1,
+            order: 1,
+            position: 1,
+            status: 'completed',
+            data: { id: 99, Name: 'Ada' },
+            field_names: { field_10: 'Name' },
+          },
+        ],
+        client_actions: [action],
+      },
+    })
+    const wrapper = await mountField()
+
+    await wrapper.find('button').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(
+      execute.mock.calls[0][0].applicationContext.previousActionResults
+    ).toEqual({
+      1: {
+        data: { id: 99, Name: 'Ada' },
+        fieldNames: { field_10: 'Name' },
+        order: 1,
+        position: 1,
+      },
     })
   })
 

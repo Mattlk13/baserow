@@ -181,13 +181,15 @@ describe('OpenUrlWorkflowActionType', () => {
   })
 
   test('a url pointing at a missing field raises a toast instead of throwing', async () => {
+    // Resolving to `false` rather than throwing: the caller stops the client
+    // actions after this one instead of handling a rejection.
     await expect(
       execute({
         type: 'open_url',
         url: { formula: "get('fields.field_404')" },
         target: 'blank',
       })
-    ).resolves.toBeUndefined()
+    ).resolves.toBe(false)
 
     expect(openSpy).not.toHaveBeenCalled()
     expect(dispatchSpy).toHaveBeenCalledWith(
@@ -212,6 +214,94 @@ describe('OpenUrlWorkflowActionType', () => {
         title: 'openUrlWorkflowAction.invalidUrlTitle',
       })
     )
+  })
+
+  // A previous action's result comes back raw, so a single select, link row or
+  // file resolves to an object. Stringified it would build a URL out of JSON.
+  const withResult = (data) => ({
+    row,
+    fields,
+    previousActionResults: {
+      7: { data, fieldNames: { field_9: 'Choice' } },
+    },
+  })
+
+  const executeWith = (workflowAction, applicationContext) =>
+    actionType.execute({ workflowAction, applicationContext })
+
+  test('a composite value is refused rather than stringified into a url', async () => {
+    await executeWith(
+      {
+        type: 'open_url',
+        url: {
+          formula:
+            "concat('https://example.com/', get('previous_action.7.field_9'))",
+        },
+        target: 'self',
+      },
+      withResult({ id: 3, Choice: { id: 1, value: 'value', color: 'blue' } })
+    )
+
+    expect(window.location.href).toBe('')
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      'toast/error',
+      expect.objectContaining({
+        title: 'openUrlWorkflowAction.invalidUrlTitle',
+      })
+    )
+  })
+
+  test('a list value is refused too', async () => {
+    // A link row or a multiple select.
+    await executeWith(
+      {
+        type: 'open_url',
+        url: { formula: "get('previous_action.7.field_9')" },
+        target: 'blank',
+      },
+      withResult({ id: 3, Choice: [{ id: 1, value: 'row' }] })
+    )
+
+    expect(openSpy).not.toHaveBeenCalled()
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      'toast/error',
+      expect.objectContaining({
+        title: 'openUrlWorkflowAction.invalidUrlTitle',
+      })
+    )
+  })
+
+  test('a scalar from a previous action still resolves', async () => {
+    await executeWith(
+      {
+        type: 'open_url',
+        url: {
+          formula:
+            "concat('https://example.com/', get('previous_action.7.field_9'))",
+        },
+        target: 'self',
+      },
+      withResult({ id: 3, Choice: 'plain' })
+    )
+
+    expect(window.location.href).toBe('https://example.com/plain')
+  })
+
+  test('a path reaching inside a composite still resolves', async () => {
+    // Only the leaf reaches the URL, so a deeper path is not a composite.
+    await executeWith(
+      {
+        type: 'open_url',
+        url: {
+          formula:
+            "concat('https://example.com/', get('previous_action.7.field_9.value'))",
+        },
+        target: 'self',
+      },
+      withResult({ id: 3, Choice: { id: 1, value: 'value', color: 'blue' } })
+    )
+
+    expect(window.location.href).toBe('https://example.com/value')
   })
 
   test('an empty formula raises a toast rather than navigating', async () => {

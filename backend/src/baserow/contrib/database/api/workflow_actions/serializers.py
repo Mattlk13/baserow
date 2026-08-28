@@ -81,6 +81,17 @@ class DispatchResultSerializer(serializers.Serializer):
     workflow_action_id = serializers.IntegerField(
         help_text="The workflow action this result belongs to."
     )
+    order = serializers.IntegerField(
+        help_text="The order the action carries, which two actions can share."
+    )
+    position = serializers.IntegerField(
+        allow_null=True,
+        help_text=(
+            "Where the action ran in the sequence, counting from one, so the "
+            "browser can tell which results a frontend-only action ran after. "
+            "`null` when the click ran no sequence to place it in."
+        ),
+    )
     status = serializers.CharField(
         help_text=(
             "`completed` when the action finished during this request. Reserved "
@@ -90,6 +101,32 @@ class DispatchResultSerializer(serializers.Serializer):
     data = serializers.JSONField(
         allow_null=True, help_text="The action's result, if it produced one."
     )
+    field_names = serializers.DictField(
+        child=serializers.CharField(),
+        help_text=(
+            "Maps `field_<id>` to the name the result is keyed by, so a "
+            "frontend-only action can resolve a `previous_action` path."
+        ),
+    )
+
+
+class DispatchedClientActionSerializer(DatabaseWorkflowActionSerializer):
+    """A frontend-only action, with where it ran in the sequence."""
+
+    position = serializers.SerializerMethodField(
+        help_text=(
+            "Where the action ran in the sequence, counting from one, on the "
+            "same scale as a result's. `null` when the click ran no sequence "
+            "to place it in."
+        )
+    )
+
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
+    def get_position(self, instance: DatabaseWorkflowAction) -> Optional[int]:
+        return self.context.get("positions", {}).get(instance.id)
+
+    class Meta(DatabaseWorkflowActionSerializer.Meta):
+        fields = DatabaseWorkflowActionSerializer.Meta.fields + ("position",)
 
 
 class DispatchWorkflowActionsResponseSerializer(serializers.Serializer):
@@ -104,7 +141,7 @@ class DispatchWorkflowActionsResponseSerializer(serializers.Serializer):
     @extend_schema_field(
         DiscriminatorCustomFieldsMappingSerializer(
             database_workflow_action_type_registry,
-            DatabaseWorkflowActionSerializer,
+            DispatchedClientActionSerializer,
             many=True,
         )
     )

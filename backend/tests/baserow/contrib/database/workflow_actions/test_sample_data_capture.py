@@ -1,5 +1,8 @@
 from contextlib import contextmanager
+from smtplib import SMTPNotSupportedError
 from unittest.mock import Mock, patch
+
+from django.conf import settings
 
 import pytest
 from loguru import logger
@@ -12,11 +15,14 @@ from baserow.contrib.database.workflow_actions.exceptions import (
 )
 from baserow.contrib.database.workflow_actions.models import (
     CoreHTTPRequestWorkflowAction,
+    CoreSMTPEmailWorkflowAction,
     LocalBaserowCreateRowWorkflowAction,
 )
 from baserow.contrib.database.workflow_actions.service import (
+    EXTERNAL_DISPATCH_FAILED_MESSAGE,
     DatabaseWorkflowActionService,
 )
+from baserow.contrib.integrations.core.constants import SMTP_EMAIL_TIMEOUT
 
 
 @contextmanager
@@ -717,3 +723,111 @@ def test_the_reason_the_last_click_left_is_replaced_by_the_next_one(data_fixture
     reason = action.service.sample_data["_error"]
     assert "timed out" in reason
     assert "404" not in reason
+
+
+@pytest.mark.django_db
+def test_the_lock_outlives_a_click_that_only_sends_email(data_fixture):
+    """
+    An email service carries no timeout of its own, but a send waits on its
+    mail server all the same. Counting it as instant leaves the lock at the
+    default while the click is still sending, and a second click then runs the
+    same actions and sends the same mail again.
+    """
+
+    user = data_fixture.create_user()
+    table, _ = _table_with_name(data_fixture, user)
+    button_field = data_fixture.create_button_field(table=table, label="Go")
+    actions = [
+        data_fixture.create_database_workflow_action(
+            CoreSMTPEmailWorkflowAction, field=button_field
+        )
+        for _ in range(5)
+    ]
+
+    ttl = DatabaseWorkflowActionService()._lock_ttl_for(actions)
+
+    assert ttl > settings.DATABASE_BUTTON_DISPATCH_LOCK_TTL_SECONDS
+    assert ttl >= 5 * SMTP_EMAIL_TIMEOUT
+
+
+@pytest.mark.django_db
+def test_a_refused_email_does_not_name_the_instance_mail_server(data_fixture, settings):
+    """
+    The service says which host refused it, and for an email action that host
+    is this installation's own mail server. A clicker only needs to know which
+    action could not be completed.
+    """
+
+    settings.INTEGRATION_ALLOW_SMTP_SERVICE_TO_USE_INSTANCE_SETTINGS = True
+    settings.CELERY_EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    settings.EMAIL_HOST = "smtp.internal.example"
+    settings.EMAIL_PORT = 2525
+    user = data_fixture.create_user()
+    table, _ = _table_with_name(data_fixture, user)
+    button_field = data_fixture.create_button_field(table=table, label="Go")
+    row = table.get_model().objects.create()
+    action = data_fixture.create_database_workflow_action(
+        CoreSMTPEmailWorkflowAction, field=button_field
+    )
+    service = action.service.specific
+    service.use_instance_smtp_settings = True
+    service.from_email = "'sender@example.com'"
+    service.to_emails = "'someone@example.com'"
+    service.subject = "'Hello'"
+    service.body = "'Hi'"
+    service.save()
+
+    # Patched where the service really fails: `get_connection` only builds the
+    # backend, and the refusal happens when the message is sent. Anywhere else
+    # and the service's own message, which names the host, is never produced.
+    with patch(
+        "django.core.mail.EmailMultiAlternatives.send",
+        side_effect=ConnectionRefusedError(),
+    ):
+        with pytest.raises(WorkflowActionDispatchError) as raised:
+            DatabaseWorkflowActionService().dispatch_workflow_actions(
+                user, button_field, row
+            )
+
+    assert raised.value.message == EXTERNAL_DISPATCH_FAILED_MESSAGE
+    # The message the service wrote, which the clicker must not be handed.
+    assert "smtp.internal.example:2525" in str(raised.value.__cause__)
+
+
+@pytest.mark.django_db
+def test_a_mail_server_that_refuses_the_message_is_still_reported(
+    data_fixture, settings
+):
+    """
+    Only a failure that names the address is withheld. One about the server's
+    own answer, such as a refused encryption, names nothing about this
+    installation and is the only thing telling the clicker what happened.
+    """
+
+    settings.INTEGRATION_ALLOW_SMTP_SERVICE_TO_USE_INSTANCE_SETTINGS = True
+    settings.CELERY_EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    settings.EMAIL_HOST = "smtp.internal.example"
+    user = data_fixture.create_user()
+    table, _ = _table_with_name(data_fixture, user)
+    button_field = data_fixture.create_button_field(table=table, label="Go")
+    row = table.get_model().objects.create()
+    action = data_fixture.create_database_workflow_action(
+        CoreSMTPEmailWorkflowAction, field=button_field
+    )
+    service = action.service.specific
+    service.use_instance_smtp_settings = True
+    service.to_emails = "'someone@example.com'"
+    service.subject = "'Hello'"
+    service.body = "'Hi'"
+    service.save()
+
+    with patch(
+        "django.core.mail.EmailMultiAlternatives.send",
+        side_effect=SMTPNotSupportedError(),
+    ):
+        with pytest.raises(WorkflowActionDispatchError) as raised:
+            DatabaseWorkflowActionService().dispatch_workflow_actions(
+                user, button_field, row
+            )
+
+    assert raised.value.message == "TLS not supported by server"

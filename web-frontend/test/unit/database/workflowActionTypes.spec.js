@@ -1,6 +1,17 @@
 import { vi } from 'vitest'
+import { readFileSync } from 'fs'
+import { resolve } from 'path'
 import { TestApp } from '@baserow/test/helpers/testApp'
 import OpenUrlWorkflowActionForm from '@baserow/modules/database/components/field/OpenUrlWorkflowActionForm'
+
+// Read rather than imported: the i18n loader turns an imported locale file
+// into compiled message ASTs, which the copy below can't be read off of.
+const en = JSON.parse(
+  readFileSync(
+    resolve(process.cwd(), 'modules/database/locales/en.json'),
+    'utf8'
+  )
+)
 
 describe('databaseWorkflowActionType registry', () => {
   let testApp = null
@@ -21,6 +32,7 @@ describe('databaseWorkflowActionType registry', () => {
       'local_baserow_delete_row',
       'local_baserow_update_row',
       'open_url',
+      'smtp_email',
     ])
   })
 
@@ -34,6 +46,7 @@ describe('databaseWorkflowActionType registry', () => {
       'local_baserow_update_row',
       'local_baserow_delete_row',
       'http_request',
+      'smtp_email',
     ])
   })
 
@@ -369,6 +382,33 @@ describe('external database workflow action types', () => {
     }
   })
 
+  test('an unsaved email already says what it will answer with', () => {
+    const actionType = typeFor('smtp_email')
+
+    // An email answers with whether it went out and nothing else, so the
+    // action after it can read that before anything is saved.
+    for (const workflowAction of [{ service: {} }, {}]) {
+      const schema = actionType.getDataSchema({}, workflowAction)
+      expect(Object.keys(schema.properties)).toEqual(['success'])
+      expect(schema.properties.success.type).toBe('boolean')
+      expect(schema.title).toBe(actionType.label)
+    }
+  })
+
+  test('a saved email is described by its own service', () => {
+    const actionType = typeFor('smtp_email')
+    const schema = {
+      type: 'object',
+      title: 'SMTPEmail12Schema',
+      properties: { success: { type: 'boolean', title: 'Success' } },
+    }
+
+    expect(actionType.getDataSchema({}, { service: { schema } })).toEqual({
+      ...schema,
+      title: actionType.label,
+    })
+  })
+
   test('a table fetch cannot describe them either', () => {
     const actionType = typeFor('http_request')
     const applicationContext = { tableFields: { 1: [{ id: 2, type: 'text' }] } }
@@ -380,17 +420,35 @@ describe('external database workflow action types', () => {
     expect(schema.properties.field_2).toBeUndefined()
   })
 
-  test('it can be read by a later action', () => {
+  test('both can be read by a later action', () => {
     expect(typeFor('http_request').producesResult).toBe(true)
+    expect(typeFor('smtp_email').producesResult).toBe(true)
   })
 
-  test('it offers no field mappings', () => {
+  test('neither offers field mappings', () => {
     expect(typeFor('http_request').mapsFields).toBe(false)
+    expect(typeFor('smtp_email').mapsFields).toBe(false)
   })
 
-  test('it resolves the shared service type and its form', () => {
+  test('email keeps the integration branch out of its form', () => {
+    // A button's actions carry no integration, so the dropdown could never be
+    // filled and unchecking the box would build a service that fails on click.
+    expect(typeFor('smtp_email').serviceFormProps).toEqual({
+      allowIntegration: false,
+    })
+    expect(typeFor('smtp_email').getNewActionValues()).toEqual({
+      service: { use_instance_smtp_settings: true },
+    })
+  })
+
+  test('http asks for no extra form props', () => {
+    expect(typeFor('http_request').serviceFormProps).toEqual({})
+  })
+
+  test('each resolves the shared service type and its form', () => {
     for (const [actionType, serviceType] of [
       ['http_request', 'http_request'],
+      ['smtp_email', 'smtp_email'],
     ]) {
       const type = typeFor(actionType)
       expect(type.serviceType.getType()).toBe(serviceType)
@@ -398,5 +456,72 @@ describe('external database workflow action types', () => {
       expect(type.label).toBe(type.serviceType.name)
       expect(type.icon).toBe(type.serviceType.icon)
     }
+  })
+})
+
+describe('CoreSMTPEmailWorkflowActionType', () => {
+  let testApp = null
+
+  beforeAll(() => {
+    testApp = new TestApp()
+  })
+
+  afterEach(() => {
+    testApp.afterEach()
+  })
+
+  const emailType = () =>
+    testApp._app.$registry.get('databaseWorkflowActionType', 'smtp_email')
+
+  const withInstanceSmtp = (instanceSmtp) =>
+    testApp.store.commit('settings/SET_SETTINGS', {
+      instance_smtp: instanceSmtp,
+    })
+
+  // What the action list passes: the base type only asks about deactivation
+  // when it knows the workspace.
+  const context = { workspace: { id: 1 } }
+
+  test('an instance that cannot send is said so before the action is saved', () => {
+    withInstanceSmtp({ available: false, unavailable_reason: 'no_server' })
+
+    // An action being configured has no service yet, so the reason cannot
+    // come from one.
+    const action = { id: 1, type: 'smtp_email' }
+
+    // `$t` returns the key in the test env, so the copy is pinned separately.
+    expect(emailType().getErrorMessage(action, context)).toBe(
+      'databaseWorkflowActionType.noInstanceSmtp'
+    )
+    expect(en.databaseWorkflowActionType.noInstanceSmtp).toContain(
+      'no SMTP server configured'
+    )
+  })
+
+  test('sending turned off by an administrator says that instead', () => {
+    withInstanceSmtp({ available: false, unavailable_reason: 'turned_off' })
+
+    expect(
+      emailType().getErrorMessage({ id: 1, type: 'smtp_email' }, context)
+    ).toBe('databaseWorkflowActionType.instanceSmtpTurnedOff')
+    expect(en.databaseWorkflowActionType.instanceSmtpTurnedOff).toContain(
+      'turned off'
+    )
+  })
+
+  test('an instance that can send says nothing', () => {
+    withInstanceSmtp({ available: true, unavailable_reason: null })
+
+    expect(
+      emailType().getErrorMessage({ id: 1, type: 'smtp_email' }, context)
+    ).toBeNull()
+  })
+
+  test('an installation older than the flag is left to the click', () => {
+    testApp.store.commit('settings/SET_SETTINGS', {})
+
+    expect(
+      emailType().getErrorMessage({ id: 1, type: 'smtp_email' }, context)
+    ).toBeNull()
   })
 })

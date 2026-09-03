@@ -51,10 +51,12 @@ from baserow.core.services.exceptions import (
     InvalidContextContentDispatchException,
     InvalidContextDispatchException,
     PermissionDeniedDispatchException,
+    RemoteRefusedDispatchException,
     ResponseTooLargeDispatchException,
     ServiceImproperlyConfiguredDispatchException,
     TriggerServiceNotDispatchable,
     UnexpectedDispatchException,
+    UnreachableAddressDispatchException,
 )
 from baserow.core.services.types import DispatchResult
 from baserow.core.types import PermissionCheck
@@ -63,10 +65,14 @@ from baserow.core.types import PermissionCheck
 # names the URL it could not reach, which is where an API key would be.
 EXTERNAL_DISPATCH_FAILED_MESSAGE = "the request could not be completed"
 
-# Failures whose message can name where the request was going. An external
-# action never repeats these to the clicker. Listed rather than excluded, so a
-# new failure stays readable until it is known to name an address.
-ADDRESS_BEARING_DISPATCH_EXCEPTIONS = (UnexpectedDispatchException,)
+# Failures whose message can name where the request was going: the URL with its
+# query string, or the instance's own mail host. An external action never
+# repeats these to the clicker. Listed rather than excluded, so a new failure
+# stays readable until it is known to name an address.
+ADDRESS_BEARING_DISPATCH_EXCEPTIONS = (
+    UnexpectedDispatchException,
+    UnreachableAddressDispatchException,
+)
 
 # Failures a service raises before it can send anything: a formula it could not
 # resolve, or a body it refused to build. Nothing left the instance, so a click
@@ -89,9 +95,18 @@ def reached_outside(exc: Exception) -> bool:
     :return: True when the request went out, so the click owes for it.
     """
 
-    # A subclass of the configuration failures above, but raised on the answer
-    # rather than before the request, so it is charged like any other.
-    if isinstance(exc, ResponseTooLargeDispatchException):
+    # Subclasses of the configuration failures above, but raised once the
+    # instance had already reached out: a refusal on the answer's size, a
+    # connection that was attempted, or a server that answered and then turned
+    # the exchange down. All are charged like any other.
+    if isinstance(
+        exc,
+        (
+            ResponseTooLargeDispatchException,
+            UnreachableAddressDispatchException,
+            RemoteRefusedDispatchException,
+        ),
+    ):
         return True
 
     return not isinstance(exc, DID_NOT_REACH_OUT_EXCEPTIONS)
@@ -176,6 +191,8 @@ class DatabaseWorkflowActionService:
             context=field,
         )
 
+        workflow_action_type.raise_if_deactivated(field.table.database.workspace)
+
         prepared_values = workflow_action_type.prepare_values(kwargs, user)
         workflow_action = self.handler.create_workflow_action(
             workflow_action_type, field=field, **prepared_values
@@ -206,6 +223,7 @@ class DatabaseWorkflowActionService:
             workflow_action_type = database_workflow_action_type_registry.get(
                 kwargs["type"]
             )
+            workflow_action_type.raise_if_deactivated(field.table.database.workspace)
             prepared_values = workflow_action_type.prepare_values(kwargs, user)
             workflow_action = self.handler.change_workflow_action_type(
                 workflow_action, workflow_action_type, **prepared_values
@@ -269,10 +287,15 @@ class DatabaseWorkflowActionService:
         :return: The TTL in seconds.
         """
 
-        waiting_on = sum(
-            getattr(workflow_action.service.specific, "timeout", 0) or 0
+        # The service type owns the number: an email waits on its server
+        # without carrying a timeout field of its own.
+        services = [
+            workflow_action.service.specific
             for workflow_action in server_actions
             if workflow_action.get_type().is_external
+        ]
+        waiting_on = sum(
+            service.get_type().max_dispatch_seconds(service) for service in services
         )
         return max(settings.DATABASE_BUTTON_DISPATCH_LOCK_TTL_SECONDS, waiting_on * 2)
 
@@ -478,6 +501,19 @@ class DatabaseWorkflowActionService:
             workspace=field.table.database.workspace,
             raise_exception=True,
         )
+
+        # Refused as a whole: a sequence that cannot finish should not start.
+        # After the permission check, since the reason describes how this
+        # installation is configured and only a dispatcher may see it. Once per
+        # type, since it is the type that is unavailable rather than the
+        # action, and in the order the actions run, so a button carrying two of
+        # them names the same one every time.
+        checked_types = {}
+        for workflow_action in workflow_actions:
+            workflow_action_type = workflow_action.get_type()
+            checked_types.setdefault(workflow_action_type.type, workflow_action_type)
+        for workflow_action_type in checked_types.values():
+            workflow_action_type.raise_if_deactivated(field.table.database.workspace)
 
         # Frontend-only actions can't be dispatched here; the caller runs them
         # in the browser.

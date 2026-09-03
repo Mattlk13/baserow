@@ -75,9 +75,11 @@ from baserow.core.services.dispatch_context import DispatchContext
 from baserow.core.services.exceptions import (
     AddressNotAllowedDispatchException,
     InvalidContextContentDispatchException,
+    RemoteRefusedDispatchException,
     ResponseTooLargeDispatchException,
     ServiceImproperlyConfiguredDispatchException,
     UnexpectedDispatchException,
+    UnreachableAddressDispatchException,
 )
 from baserow.core.services.models import Service
 from baserow.core.services.registries import (
@@ -428,6 +430,9 @@ class CoreHTTPRequestServiceType(CoreServiceType):
             .prefetch_related("headers", "query_params", "form_data")
         )
 
+    def max_dispatch_seconds(self, service: CoreHTTPRequestService) -> int:
+        return service.timeout or 0
+
     def get_schema_name(self, service: CoreHTTPRequestService) -> str:
         return f"HTTPRequest{service.id}Schema"
 
@@ -771,6 +776,19 @@ class CoreSMTPEmailServiceType(CoreServiceType):
         "body",
     ]
 
+    # Who the message goes to and what it says. A literal recipient is somebody
+    # personal data, and a literal body is whatever the button was set up to
+    # send, so neither travels to a third party the way the configuration does.
+    sensitive_fields = [
+        "from_email",
+        "from_name",
+        "to_emails",
+        "cc_emails",
+        "bcc_emails",
+        "subject",
+        "body",
+    ]
+
     serializer_field_names = [
         "integration_id",
         "use_instance_smtp_settings",
@@ -813,7 +831,7 @@ class CoreSMTPEmailServiceType(CoreServiceType):
         return {
             "use_instance_smtp_settings": serializers.BooleanField(
                 required=False,
-                default=self._instance_smtp_is_available(),
+                default=self.instance_smtp_is_available(),
                 help_text=CoreSMTPEmailService._meta.get_field(
                     "use_instance_smtp_settings"
                 ).help_text,
@@ -858,15 +876,65 @@ class CoreSMTPEmailServiceType(CoreServiceType):
             ),
         }
 
-    def _instance_smtp_is_available(self) -> bool:
+    # An installation with no SMTP server keeps a backend that writes the
+    # message somewhere local and reports that it sent it.
+    NON_DELIVERING_EMAIL_BACKENDS = ("console", "dummy", "locmem", "filebased")
+
+    # Why this installation cannot send through its own server. Returned as a
+    # code rather than a sentence, so each caller can word it for its own
+    # reader and translate it.
+    INSTANCE_SMTP_TURNED_OFF = "turned_off"
+    INSTANCE_SMTP_NO_SERVER = "no_server"
+
+    def instance_smtp_is_available(self) -> bool:
+        """
+        Whether a service may send through this installation's own mail
+        server. The setting and a host are what the Application Builder and
+        automations have always gone by; what the backend does with a message
+        is left to callers that must know it is delivered, see
+        `instance_smtp_unavailable_reason`.
+
+        :return: True when the instance server may be used.
+        """
+
         return bool(
             settings.INTEGRATION_ALLOW_SMTP_SERVICE_TO_USE_INSTANCE_SETTINGS
             and getattr(settings, "EMAIL_HOST", "")
         )
 
+    def instance_smtp_unavailable_reason(self) -> Optional[str]:
+        """
+        Why a message handed to this installation's own server would not be
+        delivered. Stricter than `instance_smtp_is_available`: a backend that
+        only prints the message counts as having no server. For a caller with
+        no integration to fall back on, such as a button field's action.
+
+        :return: One of the `INSTANCE_SMTP_*` codes, or `None` when it can.
+        """
+
+        if not settings.INTEGRATION_ALLOW_SMTP_SERVICE_TO_USE_INSTANCE_SETTINGS:
+            return self.INSTANCE_SMTP_TURNED_OFF
+
+        # The same question a dispatch asks, so the editor cannot offer an
+        # action that the send then refuses for want of a host.
+        if not self.instance_smtp_is_available():
+            return self.INSTANCE_SMTP_NO_SERVER
+
+        # `EMAIL_HOST` falls back to Django's own "localhost", so having a host
+        # says nothing about whether this installation can send. What it does
+        # with a message it is given does, and a backend it does not name at
+        # all is one the service could not ask for.
+        backend = getattr(settings, "CELERY_EMAIL_BACKEND", None) or ""
+        segments = backend.split(".")
+        if not backend or any(
+            name in segments for name in self.NON_DELIVERING_EMAIL_BACKENDS
+        ):
+            return self.INSTANCE_SMTP_NO_SERVER
+        return None
+
     def _should_use_instance_smtp(self, service: CoreSMTPEmailService) -> bool:
         return bool(
-            service.use_instance_smtp_settings and self._instance_smtp_is_available()
+            service.use_instance_smtp_settings and self.instance_smtp_is_available()
         )
 
     def requires_integration(self, service: CoreSMTPEmailService) -> bool:
@@ -880,7 +948,7 @@ class CoreSMTPEmailServiceType(CoreServiceType):
                 "use_instance_smtp_settings",
                 instance.use_instance_smtp_settings if instance else True,
             )
-            if self._instance_smtp_is_available()
+            if self.instance_smtp_is_available()
             else False
         )
 
@@ -890,6 +958,15 @@ class CoreSMTPEmailServiceType(CoreServiceType):
         values["use_instance_smtp_settings"] = use_instance_smtp_settings
 
         return values
+
+    # The timeout is per socket operation rather than for the send as a whole,
+    # and a send is a conversation: connect, greeting, EHLO, STARTTLS, EHLO
+    # again, AUTH, MAIL FROM, one RCPT per recipient, DATA, the body, QUIT.
+    # Sized for a handful of recipients on a relay that is slow at every step.
+    SMTP_SEND_SOCKET_OPERATIONS = 15
+
+    def max_dispatch_seconds(self, service: CoreSMTPEmailService) -> int:
+        return SMTP_EMAIL_TIMEOUT * self.SMTP_SEND_SOCKET_OPERATIONS
 
     def get_schema_name(self, service: CoreSMTPEmailService) -> str:
         return f"SMTPEmail{service.id}Schema"
@@ -1026,19 +1103,19 @@ class CoreSMTPEmailServiceType(CoreServiceType):
                 }
             }
         except SMTPNotSupportedError as e:
-            raise ServiceImproperlyConfiguredDispatchException(
-                "TLS not supported by server"
-            ) from e
+            # The server was reached and answered, so the click is charged for
+            # it even though the fix is in the configuration.
+            raise RemoteRefusedDispatchException("TLS not supported by server") from e
         except socket.gaierror as e:
-            raise ServiceImproperlyConfiguredDispatchException(
+            raise UnreachableAddressDispatchException(
                 f"The host {smtp_host}:{smtp_port} could not be reached"
             ) from e
         except ConnectionRefusedError as e:
-            raise ServiceImproperlyConfiguredDispatchException(
+            raise UnreachableAddressDispatchException(
                 f"Connection refused by {smtp_host}:{smtp_port}"
             ) from e
         except SMTPAuthenticationError as e:
-            raise ServiceImproperlyConfiguredDispatchException(
+            raise RemoteRefusedDispatchException(
                 "The username or password is incorrect"
             ) from e
         except SMTPConnectError as e:

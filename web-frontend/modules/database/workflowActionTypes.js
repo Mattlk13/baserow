@@ -6,7 +6,10 @@ import {
   LocalBaserowUpdateRowWorkflowServiceType,
   LocalBaserowDeleteRowWorkflowServiceType,
 } from '@baserow/modules/integrations/localBaserow/serviceTypes'
-import { CoreHTTPRequestServiceType } from '@baserow/modules/integrations/core/serviceTypes'
+import {
+  CoreHTTPRequestServiceType,
+  CoreSMTPEmailServiceType,
+} from '@baserow/modules/integrations/core/serviceTypes'
 import { resolveFormula } from '@baserow/modules/core/formula'
 import RuntimeFormulaContext from '@baserow/modules/core/runtimeFormulaContext'
 import {
@@ -128,6 +131,11 @@ export class DatabaseWorkflowActionServiceType extends WorkflowActionType {
    */
   get capturesSampleData() {
     return false
+  }
+
+  /** Extra props for a type that narrows what the shared form offers. */
+  get serviceFormProps() {
+    return {}
   }
 
   getFormProps({ workflowAction, database }) {
@@ -549,5 +557,52 @@ export class CoreHTTPRequestWorkflowActionType extends DatabaseExternalWorkflowA
       'service',
       CoreHTTPRequestServiceType.getType()
     )
+  }
+}
+
+export class CoreSMTPEmailWorkflowActionType extends DatabaseExternalWorkflowActionType {
+  static getType() {
+    return 'smtp_email'
+  }
+
+  getOrder() {
+    return 50
+  }
+
+  get serviceType() {
+    return this.app.$registry.get('service', CoreSMTPEmailServiceType.getType())
+  }
+
+  /**
+   * A button's actions carry no integration (ADR 006 section 5), so the form
+   * must not offer a dropdown nothing here can fill.
+   */
+  get serviceFormProps() {
+    return { allowIntegration: false }
+  }
+
+  getNewActionValues() {
+    return { service: { use_instance_smtp_settings: true } }
+  }
+
+  /**
+   * Why this installation cannot send, read from the settings the editor
+   * already has rather than from the action. An action being configured has
+   * not been saved yet and carries no service to ask, so without this the
+   * first thing to say so would be the refusal on save.
+   *
+   * @returns The reason in the reader's language, or null when it can send.
+   */
+  isDeactivatedReason({ workspace }) {
+    const instanceSmtp =
+      this.app.$store.getters['settings/get']?.instance_smtp || {}
+    // Absent on an installation older than the flag, which is left alone: a
+    // click still says what went wrong.
+    if (instanceSmtp.available !== false) {
+      return null
+    }
+    return instanceSmtp.unavailable_reason === 'turned_off'
+      ? this.app.$i18n.t('databaseWorkflowActionType.instanceSmtpTurnedOff')
+      : this.app.$i18n.t('databaseWorkflowActionType.noInstanceSmtp')
   }
 }

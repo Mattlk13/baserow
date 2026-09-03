@@ -1,3 +1,4 @@
+from smtplib import SMTPAuthenticationError, SMTPNotSupportedError
 from unittest.mock import patch
 
 from django.urls import reverse
@@ -8,6 +9,7 @@ from rest_framework.status import (
     HTTP_200_OK,
     HTTP_400_BAD_REQUEST,
     HTTP_401_UNAUTHORIZED,
+    HTTP_403_FORBIDDEN,
     HTTP_409_CONFLICT,
     HTTP_429_TOO_MANY_REQUESTS,
 )
@@ -17,6 +19,12 @@ from baserow.contrib.database.table.handler import TableHandler
 from baserow.contrib.database.workflow_actions.models import (
     CoreHTTPRequestWorkflowAction,
     LocalBaserowCreateRowWorkflowAction,
+)
+from baserow.contrib.database.workflow_actions.registries import (
+    database_workflow_action_type_registry,
+)
+from baserow.contrib.database.workflow_actions.service import (
+    DatabaseWorkflowActionService,
 )
 from baserow.core.exceptions import PermissionException
 from baserow.throttling.types import RateLimit
@@ -56,6 +64,25 @@ def _add_row_action(data_fixture, button_field, table):
     service.save()
     name_field = table.field_set.get(name="Name")
     service.field_mappings.create(field=name_field, value="'Ada'", enabled=True)
+    return action
+
+
+def _add_email_action(data_fixture, user, button_field):
+    """
+    Created through the service so the type pins the instance server on it,
+    the way a real editor does.
+    """
+
+    action = DatabaseWorkflowActionService().create_workflow_action(
+        user,
+        database_workflow_action_type_registry.get("smtp_email"),
+        button_field,
+    )
+    service = action.service.specific
+    service.to_emails = "'someone@example.com'"
+    service.subject = "'Hello'"
+    service.body = "'Hi'"
+    service.save()
     return action
 
 
@@ -453,6 +480,70 @@ def test_a_click_that_failed_after_its_request_still_spends_it(
     assert request.call_count == 1
 
     with mock_advocate_request({"ok": True}):
+        assert _click(api_client, token, button_field, row).status_code == (
+            HTTP_429_TOO_MANY_REQUESTS
+        )
+
+
+@pytest.mark.django_db
+def test_a_click_refused_by_a_deactivated_type_spends_nothing(
+    api_client, data_fixture, settings
+):
+    """
+    Nothing ran, so nothing reached outside. An instance that stopped being
+    able to send must not also cost its members their budget on every click.
+    """
+
+    settings.DATABASE_BUTTON_DISPATCH_USER_RATE_LIMITS = ONE_PER_MINUTE
+    settings.INTEGRATION_ALLOW_SMTP_SERVICE_TO_USE_INSTANCE_SETTINGS = True
+    settings.CELERY_EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    user, token = data_fixture.create_user_and_token()
+    table, button_field, row = _button(data_fixture, user)
+    _add_email_action(data_fixture, user, button_field)
+
+    settings.CELERY_EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+    refused = _click(api_client, token, button_field, row)
+    assert refused.status_code == HTTP_403_FORBIDDEN
+    assert refused.json()["error"] == "ERROR_WORKFLOW_ACTION_TYPE_DEACTIVATED"
+
+    # The budget is intact, so the one external click it allows is still there.
+    settings.CELERY_EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    with patch("django.core.mail.EmailMultiAlternatives.send", return_value=1):
+        assert _click(api_client, token, button_field, row).status_code == HTTP_200_OK
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        SMTPAuthenticationError(535, b"authentication failed"),
+        SMTPNotSupportedError("STARTTLS extension not supported by server"),
+    ],
+)
+def test_a_server_that_refused_after_answering_still_spends_the_slot(
+    api_client, data_fixture, settings, refusal
+):
+    """
+    A rejected login, or a server that will not start TLS, is a configuration
+    problem the sender can fix, but the instance had already opened the
+    connection and held a conversation with the server. Giving the slot back
+    would make that traffic free to repeat.
+    """
+
+    settings.DATABASE_BUTTON_DISPATCH_USER_RATE_LIMITS = ONE_PER_MINUTE
+    settings.INTEGRATION_ALLOW_SMTP_SERVICE_TO_USE_INSTANCE_SETTINGS = True
+    settings.CELERY_EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    user, token = data_fixture.create_user_and_token()
+    table, button_field, row = _button(data_fixture, user)
+    _add_email_action(data_fixture, user, button_field)
+
+    with patch("django.core.mail.EmailMultiAlternatives.send", side_effect=refusal):
+        failed = _click(api_client, token, button_field, row)
+
+    assert failed.status_code == HTTP_400_BAD_REQUEST
+
+    # The server was reached, so the click keeps what it spent.
+    with patch("django.core.mail.EmailMultiAlternatives.send", return_value=1):
         assert _click(api_client, token, button_field, row).status_code == (
             HTTP_429_TOO_MANY_REQUESTS
         )

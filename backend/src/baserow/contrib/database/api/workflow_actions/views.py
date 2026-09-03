@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, List
 
 from django.db import transaction
 
@@ -15,6 +15,7 @@ from baserow.api.decorators import (
     validate_body_custom_fields,
 )
 from baserow.api.errors import ERROR_USER_NOT_IN_GROUP
+from baserow.api.exceptions import ThrottledAPIException
 from baserow.api.schemas import CLIENT_SESSION_ID_SCHEMA_PARAMETER, get_error_schema
 from baserow.api.utils import (
     CustomFieldRegistryMappingSerializer,
@@ -38,6 +39,10 @@ from baserow.contrib.database.api.workflow_actions.serializers import (
     DispatchWorkflowActionsSerializer,
     OrderWorkflowActionsSerializer,
     UpdateDatabaseWorkflowActionSerializer,
+)
+from baserow.contrib.database.api.workflow_actions.throttling import (
+    ButtonFieldDispatchUserRateThrottle,
+    ButtonFieldDispatchWorkspaceRateThrottle,
 )
 from baserow.contrib.database.application_types import DatabaseApplicationType
 from baserow.contrib.database.fields.exceptions import FieldDoesNotExist
@@ -370,6 +375,118 @@ class OrderDatabaseWorkflowActionsView(APIView):
 class DispatchDatabaseWorkflowActionsView(APIView):
     permission_classes = (IsAuthenticated,)
 
+    def _reserve_dispatch_budget(
+        self, request, field: ButtonField, workflow_actions: list
+    ) -> List[list]:
+        """
+        Takes a slot from each rate limit guarding external clicks, one per
+        action that will reach outside Baserow. Per action rather than per
+        click, or a button carrying ten requests would send ten for the price
+        of one.
+
+        Reserved up front, the only way a limit holds under a burst, and given
+        back afterwards for whatever the click did not spend. A limit that
+        denies mid way gives back what came before it.
+
+        Nothing is reserved for a button that only touches rows here.
+
+        :param request: The click.
+        :param field: The button field being clicked.
+        :param workflow_actions: The snapshot the click will run.
+        :return: One list of throttles per external action, each holding a
+            slot.
+        :raises ThrottledAPIException: When the click is over a limit, or
+            carries more external actions than one could ever hold.
+        """
+
+        external_count = sum(
+            1
+            for workflow_action in workflow_actions
+            if workflow_action.get_type().is_external
+        )
+        if not external_count:
+            return []
+
+        workspace_id = field.table.database.workspace_id
+        reservations: List[list] = []
+
+        try:
+            for build_throttle in (
+                ButtonFieldDispatchUserRateThrottle,
+                lambda: ButtonFieldDispatchWorkspaceRateThrottle(workspace_id),
+            ):
+                held: list = []
+                reservations.append(held)
+                for _ in range(
+                    self._slots_to_take(build_throttle(), request, external_count)
+                ):
+                    throttle = build_throttle()
+                    throttle.allow_request(request, self)
+                    held.append(throttle)
+        except ThrottledAPIException:
+            self._release_dispatch_budget(reservations)
+            raise
+
+        return reservations
+
+    def _slots_to_take(self, throttle, request, external_count: int) -> int:
+        """
+        How many slots one click takes from a limit: one for every action of
+        it that reaches outside Baserow.
+
+        A button carrying more of them than the limit could ever hold is
+        refused instead. Capping the reservation would be worse than counting
+        it wrong: the click would still send every one of its requests, so the
+        limit would be paying for a burst of any size it likes, which is the
+        one thing it exists to stop. Such a button cannot be clicked inside
+        the budget at all, and waiting does not change that, so the answer
+        says so rather than pretending the next window will help.
+
+        :param throttle: The limit being asked.
+        :param request: The click.
+        :param external_count: How many actions of it reach outside Baserow.
+        :raises ThrottledAPIException: When the button carries more external
+            actions than the limit could ever hold.
+        :return: The number of slots to reserve.
+        """
+
+        rate_limits = tuple(throttle.get_rate_limits(request) or ())
+
+        if not rate_limits or throttle.get_cache_key(request) is None:
+            # Switched off, or the caller is exempt, so `allow_request` is a
+            # no-op and one is enough to keep the bookkeeping the same shape.
+            return 1
+
+        capacity = min(rate.number_of_calls for rate in rate_limits)
+
+        if external_count > capacity:
+            raise ThrottledAPIException(
+                detail=(
+                    f"This button sends {external_count} requests outside "
+                    f"Baserow, and this installation allows at most "
+                    f"{capacity}. Waiting will not help: it has to carry "
+                    f"fewer of them."
+                )
+            )
+
+        return external_count
+
+    def _release_dispatch_budget(self, reservations: List[list], keep: int = 0) -> None:
+        """
+        Gives back the slots the click did not spend.
+
+        :param reservations: What `_reserve_dispatch_budget` took, one list per
+            limit.
+        :param keep: How many external actions the click really ran. Their
+            slots stay spent, a failed request included: the budget caps the
+            traffic, not the successes. A limit that gave fewer slots than that
+            keeps all of them.
+        """
+
+        for held in reservations:
+            for throttle in held[min(keep, len(held)) :]:
+                throttle.release()
+
     @extend_schema(
         parameters=[
             OpenApiParameter(
@@ -404,6 +521,9 @@ class DispatchDatabaseWorkflowActionsView(APIView):
                 ]
             ),
             409: get_error_schema(["ERROR_WORKFLOW_ACTION_DISPATCH_IN_PROGRESS"]),
+            # DRF's own `Throttled` body carries a `detail`, not an `error`,
+            # the same as the workspace invitations view.
+            429: None,
         },
     )
     @map_exceptions(
@@ -422,16 +542,48 @@ class DispatchDatabaseWorkflowActionsView(APIView):
         field = FieldHandler().get_field(field_id, base_queryset=ButtonField.objects)
         row = RowHandler().get_row(request.user, field.table, data["row_id"])
 
-        dispatch = DatabaseWorkflowActionService().dispatch_workflow_actions(
-            request.user, field, row
+        service = DatabaseWorkflowActionService()
+        # Read once for the budget, the permission checks and the run, so all
+        # three describe the same click.
+        workflow_actions = service.get_dispatch_snapshot(field)
+        reservations = self._reserve_dispatch_budget(request, field, workflow_actions)
+        reached_outside = []
+
+        try:
+            dispatch = service.dispatch_workflow_actions(
+                request.user,
+                field,
+                row,
+                workflow_actions=workflow_actions,
+                on_external_dispatch=reached_outside.append,
+            )
+        finally:
+            # Charged for what the click really sent. Without this a member
+            # who may not dispatch could spend the workspace's budget on
+            # refusals, and a click that failed after its request could repeat
+            # that request for free.
+            self._release_dispatch_budget(reservations, keep=len(reached_outside))
+
+        # A client action can read only what ran before it, so a result with
+        # none after it is not sent at all. Configuring a button needs more
+        # permission than clicking one, and an answer from outside Baserow
+        # carries whatever the endpoint sent back, response headers included.
+        last_client_position = max(
+            (
+                dispatch.positions.get(workflow_action.id) or 0
+                for workflow_action in dispatch.client_actions
+            ),
+            default=0,
         )
 
-        # Nothing reads the names unless a client action runs. An action that
-        # returned no row, a delete for instance, has none to give either.
-        names_wanted = bool(dispatch.client_actions)
+        def is_wanted(dispatched):
+            position = dispatch.positions.get(dispatched.workflow_action.id) or 0
+            return 0 < position < last_client_position
 
         def field_names_for(dispatched):
-            if not names_wanted or not isinstance(dispatched.result.data, dict):
+            if not is_wanted(dispatched) or not isinstance(
+                dispatched.result.data, dict
+            ):
                 return {}
             workflow_action = dispatched.workflow_action
             return workflow_action.get_type().get_result_field_names(workflow_action)
@@ -449,7 +601,7 @@ class DispatchDatabaseWorkflowActionsView(APIView):
                 # Every action runs synchronously inside the request. The field
                 # is here so an async one can report "dispatched" later.
                 "status": "completed",
-                "data": dispatched.result.data,
+                "data": dispatched.result.data if is_wanted(dispatched) else None,
                 "field_names": field_names_for(dispatched),
             }
             for dispatched in dispatch.dispatched

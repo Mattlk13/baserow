@@ -1,4 +1,5 @@
 import json
+import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock, Mock, patch
 
@@ -40,6 +41,11 @@ def mock_advocate_request(
 
     mock_response.headers = headers
     mock_response.status_code = status_code
+    # The service streams the body in so it can stop an endpoint that
+    # sends more than this installation accepts.
+    mock_response.iter_content.return_value = iter(
+        [str(mock_response.text or "").encode()]
+    )
 
     # Use the patch context manager to mock `advocate.request`
     with patch("advocate.request", return_value=mock_response) as mock_request:
@@ -76,6 +82,7 @@ def test_core_http_request_basic(
                 "method": HTTP_METHOD.POST,
                 "params": {},
                 "timeout": 15,
+                "stream": True,
                 "url": "http://example.notexist/",
             }
         )
@@ -166,6 +173,7 @@ def test_core_http_request_basic_body_raw(
                 "method": HTTP_METHOD.GET,
                 "params": {},
                 "timeout": 30,
+                "stream": True,
                 "url": "http://example.notexist/",
             }
         )
@@ -195,6 +203,7 @@ def test_core_http_request_basic_body_json(
                 "method": HTTP_METHOD.GET,
                 "params": {},
                 "timeout": 30,
+                "stream": True,
                 "url": "http://example.notexist/",
             }
         )
@@ -295,6 +304,7 @@ def test_core_http_request_body_json_with_to_json_escapes_data_source(data_fixtu
                 "method": HTTP_METHOD.GET,
                 "params": {},
                 "timeout": 30,
+                "stream": True,
                 "url": "http://example.notexist/",
             }
         )
@@ -334,6 +344,7 @@ def test_core_http_request_basic_body_json_with_control_characters(
                 "method": HTTP_METHOD.GET,
                 "params": {},
                 "timeout": 30,
+                "stream": True,
                 "url": "http://example.notexist/",
             }
         )
@@ -364,6 +375,7 @@ def test_core_http_request_with_formulas(
                 "method": HTTP_METHOD.GET,
                 "params": {},
                 "timeout": 30,
+                "stream": True,
                 "url": "http://example.notexist/2",
             }
         )
@@ -400,6 +412,7 @@ def test_core_http_request_with_headers(
                 "method": HTTP_METHOD.GET,
                 "params": {},
                 "timeout": 30,
+                "stream": True,
                 "url": "http://example.notexist/",
             }
         )
@@ -432,6 +445,7 @@ def test_core_http_request_with_query_params(
                 "method": HTTP_METHOD.GET,
                 "params": {"test": "test__2", "test2": "value"},
                 "timeout": 30,
+                "stream": True,
                 "url": "http://example.notexist/",
             }
         )
@@ -465,6 +479,7 @@ def test_core_http_request_with_form_data(
                 "data": {"test": "test__2", "test2": "value"},
                 "params": {},
                 "timeout": 30,
+                "stream": True,
                 "url": "http://example.notexist/",
             }
         )
@@ -766,6 +781,7 @@ def test_core_http_request_dispatch_data_with_json(data_fixture, content_type):
                 "method": HTTP_METHOD.POST,
                 "params": {},
                 "timeout": 15,
+                "stream": True,
                 "url": "http://example.notexist/",
             }
         )
@@ -820,6 +836,7 @@ def test_core_http_request_dispatch_data_with_text(data_fixture, content_type):
                 "method": HTTP_METHOD.POST,
                 "params": {},
                 "timeout": 15,
+                "stream": True,
                 "url": "http://example.notexist/",
             }
         )
@@ -830,3 +847,95 @@ def test_core_http_request_dispatch_data_with_text(data_fixture, content_type):
         "headers": headers,
         "status_code": 204,
     }
+
+
+@pytest.mark.django_db
+def test_a_response_bigger_than_the_ceiling_is_refused(data_fixture, settings):
+    """
+    The body is read in chunks so an endpoint cannot decide how much memory
+    this worker spends. Buffering it whole and measuring afterwards is too
+    late: a very large answer, or a small compressed one that unpacks into a
+    large one, is already held by then.
+    """
+
+    settings.INTEGRATIONS_HTTP_MAX_RESPONSE_BYTES = 1024
+    service = data_fixture.create_core_http_request_service(
+        url="'http://example.notexist/'", timeout=15, http_method=HTTP_METHOD.GET
+    )
+    service_type = service.get_type()
+
+    mock_response = Mock()
+    mock_response.headers = {}
+    mock_response.status_code = 200
+    # More than the ceiling, handed over in chunks the way a real one arrives.
+    mock_response.iter_content.return_value = iter([b"x" * 512] * 10)
+
+    with patch("advocate.request", return_value=mock_response):
+        with pytest.raises(ServiceImproperlyConfiguredDispatchException) as raised:
+            service_type.dispatch(service, FakeDispatchContext())
+
+    assert "larger than the 1024 bytes" in str(raised.value)
+    # Hung up on rather than left running.
+    mock_response.close.assert_called_once()
+
+
+@pytest.mark.django_db
+def test_a_response_within_the_ceiling_is_read_whole(data_fixture, settings):
+    settings.INTEGRATIONS_HTTP_MAX_RESPONSE_BYTES = 1024
+    service = data_fixture.create_core_http_request_service(
+        url="'http://example.notexist/'", timeout=15, http_method=HTTP_METHOD.GET
+    )
+    service_type = service.get_type()
+
+    with mock_advocate_request({"title": "small"}) as mock_request:
+        dispatch_data = service_type.dispatch(service, FakeDispatchContext())
+
+    assert mock_request.call_count == 1
+    assert dispatch_data.data["body"] == {"title": "small"}
+
+
+@pytest.mark.django_db
+def test_a_response_that_drips_forever_is_hung_up_on(data_fixture, settings):
+    """
+    Requests treats a scalar timeout as inactivity, so it starts again on every
+    byte. A server sending one every so often would otherwise hold a worker,
+    and its dispatch lock, open for as long as it liked.
+    """
+
+    settings.INTEGRATIONS_HTTP_MAX_RESPONSE_BYTES = 1024 * 1024
+    service = data_fixture.create_core_http_request_service(
+        url="'http://example.notexist/'", timeout=1, http_method=HTTP_METHOD.GET
+    )
+    service_type = service.get_type()
+
+    def drip():
+        # Never enough to reach the size ceiling, and never finished.
+        while True:
+            time.sleep(0.1)
+            yield b"x"
+
+    mock_response = Mock()
+    mock_response.headers = {}
+    mock_response.status_code = 200
+    mock_response.iter_content.return_value = drip()
+
+    with patch("advocate.request", return_value=mock_response):
+        dispatch_data = service_type.dispatch(service, FakeDispatchContext())
+
+    # A deadline reached is reported the same way as any other timeout.
+    assert dispatch_data.data["status_code"] == 504
+    mock_response.close.assert_called_once()
+
+
+@pytest.mark.django_db
+def test_a_response_that_arrives_in_time_is_not_hung_up_on(data_fixture, settings):
+    settings.INTEGRATIONS_HTTP_MAX_RESPONSE_BYTES = 1024 * 1024
+    service = data_fixture.create_core_http_request_service(
+        url="'http://example.notexist/'", timeout=30, http_method=HTTP_METHOD.GET
+    )
+    service_type = service.get_type()
+
+    with mock_advocate_request({"title": "quick"}):
+        dispatch_data = service_type.dispatch(service, FakeDispatchContext())
+
+    assert dispatch_data.data["body"] == {"title": "quick"}

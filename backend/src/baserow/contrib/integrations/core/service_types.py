@@ -3,6 +3,7 @@ import io
 import json
 import re
 import socket
+import time
 import uuid
 from datetime import datetime
 from smtplib import SMTPAuthenticationError, SMTPConnectError, SMTPNotSupportedError
@@ -72,7 +73,9 @@ from baserow.core.registries import ImportExportConfig
 from baserow.core.registry import Instance
 from baserow.core.services.dispatch_context import DispatchContext
 from baserow.core.services.exceptions import (
+    AddressNotAllowedDispatchException,
     InvalidContextContentDispatchException,
+    ResponseTooLargeDispatchException,
     ServiceImproperlyConfiguredDispatchException,
     UnexpectedDispatchException,
 )
@@ -104,6 +107,15 @@ class CoreHTTPRequestServiceType(CoreServiceType):
     type = "http_request"
     model_class = CoreHTTPRequestService
     dispatch_types = [DispatchTypes.ACTION]
+
+    # Where a credential on a request can sit. This service has no integration,
+    # so there is nowhere else for one to be kept, and which header or field
+    # holds it is not knowable: every value goes rather than a guess at the
+    # secret one. The keys stay, so an import says what has to be entered
+    # again. `url` is not here, since blanking it leaves an action that names
+    # nothing at all; a key in its query string is the one placement an export
+    # still carries.
+    sensitive_fields = ["headers", "query_params", "form_data", "body_content"]
 
     allowed_fields = [
         "http_method",
@@ -355,9 +367,18 @@ class CoreHTTPRequestServiceType(CoreServiceType):
         Responsible for creating related data (headers, query params, form_data).
         """
 
-        headers = serialized_values.pop("headers", [])
-        query_params = serialized_values.pop("query_params", [])
-        form_data = serialized_values.pop("form_data", [])
+        # An export that stripped these leaves the keys with a `None` value,
+        # so the row is kept and the value comes back as an empty formula for
+        # somebody to fill in.
+        def rows_of(prop_name):
+            return [
+                {**row, "value": row.get("value") or {}}
+                for row in (serialized_values.pop(prop_name, None) or [])
+            ]
+
+        headers = rows_of("headers")
+        query_params = rows_of("query_params")
+        form_data = rows_of("form_data")
 
         service = super().create_instance_from_serialized(
             serialized_values,
@@ -421,11 +442,16 @@ class CoreHTTPRequestServiceType(CoreServiceType):
 
         properties = {}
 
-        if (allowed_fields is None or "body" in allowed_fields) and service.sample_data:
+        # A stored failure is a message rather than an answer, so it
+        # describes no shape. Without this the body would come back as an
+        # empty object.
+        sample_data = service.sample_data
+        if sample_data and "_error" in sample_data:
+            sample_data = None
+
+        if (allowed_fields is None or "body" in allowed_fields) and sample_data:
             schema_builder = SchemaBuilder()
-            schema_builder.add_object(
-                service.sample_data.get("data", {}).get("body", {})
-            )
+            schema_builder.add_object(sample_data.get("data", {}).get("body", {}))
             schema = schema_builder.to_schema()
 
             properties |= {
@@ -447,10 +473,10 @@ class CoreHTTPRequestServiceType(CoreServiceType):
 
         if allowed_fields is None or "headers" in allowed_fields:
             schema = {}
-            if service.sample_data:
+            if sample_data:
                 schema_builder = SchemaBuilder()
                 schema_builder.add_object(
-                    service.sample_data.get("data", {}).get("headers", {})
+                    sample_data.get("data", {}).get("headers", {})
                 )
                 schema = schema_builder.to_schema()
 
@@ -557,6 +583,57 @@ class CoreHTTPRequestServiceType(CoreServiceType):
             for match in RE_FORMULA_FUNCTION.finditer(formula)
         )
 
+    def _read_response_within_limit(self, response, timeout: int) -> None:
+        """
+        Pulls the body in with a ceiling on its size and a deadline on how long
+        it may take, and hangs up on an endpoint that goes past either.
+
+        Buffering it whole and measuring afterwards is too late: the memory is
+        already spent. The size ceiling is on what arrives after decompression,
+        so a small answer that unpacks into a big one is caught. The deadline
+        is wall clock, unlike the timeout Requests applies, which only starts
+        again on every byte: a server sending one every few seconds would
+        otherwise hold this open for as long as it liked.
+
+        :param response: The streamed response.
+        :param timeout: How long the whole body may take to arrive, in seconds.
+        :raises ResponseTooLargeDispatchException: When the body is larger than
+            the ceiling.
+        :raises requests.exceptions.Timeout: When it takes longer than the
+            deadline, which the caller answers the same way as any other
+            timeout.
+        """
+
+        # Read whatever the ceiling is set to. Returning early with the ceiling
+        # off would leave the body unread under `stream=True`, so `response
+        # .json()` would pull it in later, outside the block that maps a
+        # truncated or corrupt answer onto a message the caller can use, and
+        # the deadline below would never be armed either.
+        max_bytes = settings.INTEGRATIONS_HTTP_MAX_RESPONSE_BYTES or None
+        deadline = time.monotonic() + timeout
+
+        content = bytearray()
+
+        try:
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                content += chunk
+                if max_bytes is not None and len(content) > max_bytes:
+                    raise ResponseTooLargeDispatchException(
+                        f"The response is larger than the {max_bytes} bytes this "
+                        f"installation accepts."
+                    )
+                if time.monotonic() > deadline:
+                    raise request_exceptions.Timeout(
+                        f"The response body took longer than {timeout} seconds."
+                    )
+        finally:
+            response.close()
+
+        # What `response.json()` and `response.text` read, so the rest of the
+        # dispatch is unchanged.
+        response._content = bytes(content)
+        response._content_consumed = True
+
     def dispatch_data(
         self,
         service: CoreHTTPRequestService,
@@ -610,10 +687,23 @@ class CoreHTTPRequestServiceType(CoreServiceType):
                 headers=headers,
                 params=query_params,
                 timeout=service.timeout,
+                # `_read_response_within_limit` pulls the body in, in chunks.
+                stream=True,
                 **body_dict,
             )
+            self._read_response_within_limit(response, service.timeout)
 
-        except (UnacceptableAddressException, ConnectionError) as e:
+        except ServiceImproperlyConfiguredDispatchException:
+            # Too big. The message names no address, so it travels as it is
+            # rather than as an unknown error.
+            raise
+        except UnacceptableAddressException as e:
+            # Refused before anything was sent, so a caller counting outbound
+            # traffic must not count it.
+            raise AddressNotAllowedDispatchException(
+                f"Invalid URL: {resolved_values['url']}"
+            ) from e
+        except ConnectionError as e:
             raise UnexpectedDispatchException(
                 f"Invalid URL: {resolved_values['url']}"
             ) from e
@@ -624,7 +714,15 @@ class CoreHTTPRequestServiceType(CoreServiceType):
         except request_exceptions.RequestException as e:
             raise UnexpectedDispatchException(str(e)) from e
         except Exception as e:
-            logger.exception("Error while dispatching HTTP request")
+            # Not `logger.exception`: loguru prints the frame locals beside the
+            # traceback, and this frame holds the URL, every resolved header
+            # and the body. Only the class of the failure is logged.
+            logger.error(
+                "Error while dispatching HTTP request: {exception}. The "
+                "failure itself is not logged: it names the address and what "
+                "was sent with it.",
+                exception=type(e).__name__,
+            )
             raise UnexpectedDispatchException(f"Unknown error: {str(e)}") from e
 
         try:

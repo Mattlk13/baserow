@@ -64,6 +64,82 @@ describe('FieldButtonSubForm', () => {
       vi.restoreAllMocks()
     })
 
+    test('opening the field again re-reads what a click remembered', async () => {
+      // A click makes an external action remember the answer it got, so the
+      // editor can describe it to the actions after it. This sub-form is not
+      // remounted when the field is opened again, so without a re-read the
+      // captured body stays missing until the page is reloaded.
+      const client = testApp.getApp().$client
+      client.get.mockResolvedValueOnce({
+        data: [{ id: 7, type: 'http_request', service: { id: 3, url: 'x' } }],
+      })
+      const wrapper = await mountForm({ type: 'button', id: 5, label: 'Go' })
+      await wrapper.vm.$nextTick()
+      expect(wrapper.vm.localActions[0].service.sample_data).toBeUndefined()
+
+      client.get.mockResolvedValueOnce({
+        data: [
+          {
+            id: 7,
+            type: 'http_request',
+            service: { id: 3, url: 'x', sample_data: { data: { body: {} } } },
+          },
+        ],
+      })
+      await wrapper.vm.onShow()
+
+      expect(wrapper.vm.localActions[0].service.sample_data).toEqual({
+        data: { body: {} },
+      })
+    })
+
+    test('re-reading keeps an edit nobody has saved yet', async () => {
+      // Nothing listens for the context being hidden, so an action added and
+      // then clicked away from is still buffered on the next open. Replacing
+      // the list with the server's would drop it without a word.
+      const client = testApp.getApp().$client
+      client.get.mockResolvedValueOnce({
+        data: [{ id: 7, type: 'http_request', service: { id: 3, url: 'x' } }],
+      })
+      const wrapper = await mountForm({ type: 'button', id: 5, label: 'Go' })
+      await wrapper.vm.$nextTick()
+
+      wrapper
+        .findComponent(ButtonFieldActionList)
+        .vm.addAction('local_baserow_create_row')
+      await wrapper.vm.$nextTick()
+      expect(wrapper.vm.localActions).toHaveLength(2)
+
+      client.get.mockResolvedValueOnce({
+        data: [
+          {
+            id: 7,
+            type: 'http_request',
+            service: { id: 3, url: 'x', sample_data: { data: { body: {} } } },
+          },
+        ],
+      })
+      await wrapper.vm.onShow()
+
+      // The unsaved action is still there, and the saved one picked up what
+      // the click captured.
+      expect(wrapper.vm.localActions).toHaveLength(2)
+      expect(wrapper.vm.localActions[0].service.sample_data).toEqual({
+        data: { body: {} },
+      })
+      expect(wrapper.vm.localActions[1].type).toBe('local_baserow_create_row')
+    })
+
+    test('a field that was never saved has nothing to re-read', async () => {
+      const wrapper = await mountForm({ type: 'button', label: 'Go' })
+      const client = testApp.getApp().$client
+      client.get.mockClear()
+
+      await wrapper.vm.onShow()
+
+      expect(client.get).not.toHaveBeenCalled()
+    })
+
     test('adding an action buffers it without calling the api', async () => {
       // Nothing is persisted until the field form is submitted, which is what
       // makes "add an action, press Cancel" discard it. Driven through the

@@ -6,6 +6,7 @@ import {
   LocalBaserowUpdateRowWorkflowServiceType,
   LocalBaserowDeleteRowWorkflowServiceType,
 } from '@baserow/modules/integrations/localBaserow/serviceTypes'
+import { CoreHTTPRequestServiceType } from '@baserow/modules/integrations/core/serviceTypes'
 import { resolveFormula } from '@baserow/modules/core/formula'
 import RuntimeFormulaContext from '@baserow/modules/core/runtimeFormulaContext'
 import {
@@ -118,6 +119,14 @@ export class DatabaseWorkflowActionServiceType extends WorkflowActionType {
    * fields fetched for it.
    */
   get mapsFields() {
+    return false
+  }
+
+  /**
+   * Mirrors the backend's `captures_sample_data`: a type whose result nothing
+   * can describe until a click has answered once.
+   */
+  get capturesSampleData() {
     return false
   }
 
@@ -453,6 +462,92 @@ export class LocalBaserowDeleteRowWorkflowActionType extends DatabaseWorkflowAct
     return this.app.$registry.get(
       'service',
       LocalBaserowDeleteRowWorkflowServiceType.getType()
+    )
+  }
+}
+
+/**
+ * Base for an action whose result comes from outside Baserow, so the service
+ * describes it rather than a table's fields.
+ */
+export class DatabaseExternalWorkflowActionType extends DatabaseWorkflowActionServiceType {
+  /**
+   * The parts of the answer that are there whatever the endpoint replies. An
+   * action that was only just added has no saved service, so without this it
+   * is missing from the explorer until the field is saved and reopened.
+   */
+  get baselineDataSchema() {
+    return null
+  }
+
+  /**
+   * The service's own schema rather than the row shape the base builds. Null
+   * leaves the action out of the explorer instead of describing it wrongly.
+   */
+  getDataSchema(applicationContext, workflowAction) {
+    const schema =
+      this.serviceType.getDataSchema(workflowAction.service || {}) ||
+      this.baselineDataSchema
+    if (!schema) {
+      return null
+    }
+    // The service names its schema for itself, `HTTPRequest12Schema`, which is
+    // what the explorer would show. Every other action shows its label.
+    return { ...schema, title: this.label }
+  }
+}
+
+export class CoreHTTPRequestWorkflowActionType extends DatabaseExternalWorkflowActionType {
+  static getType() {
+    return 'http_request'
+  }
+
+  getOrder() {
+    return 40
+  }
+
+  get capturesSampleData() {
+    return true
+  }
+
+  /**
+   * Every request answers with these, clicked or not. The body is left out:
+   * only a real answer says what is in it. Matches what the backend builds
+   * for a service with nothing captured.
+   */
+  get baselineDataSchema() {
+    return {
+      type: 'object',
+      properties: {
+        raw_body: { type: 'string', title: 'Raw body' },
+        headers: {
+          type: 'object',
+          title: 'Headers',
+          properties: {
+            'Content-Type': {
+              type: 'string',
+              description: 'The MIME type of the response body',
+            },
+            'Content-Length': {
+              type: 'number',
+              description:
+                'The length of the response body in octets (8-bit bytes)',
+            },
+            ETag: {
+              type: 'string',
+              description: 'An identifier for a specific version of a resource',
+            },
+          },
+        },
+        status_code: { type: 'number', title: 'Status code' },
+      },
+    }
+  }
+
+  get serviceType() {
+    return this.app.$registry.get(
+      'service',
+      CoreHTTPRequestServiceType.getType()
     )
   }
 }

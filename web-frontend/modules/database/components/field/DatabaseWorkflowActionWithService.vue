@@ -1,13 +1,34 @@
 <template>
-  <component
-    :is="serviceType.formComponent"
-    v-bind="formProps"
-    @values-changed="values.service = { ...defaultValues.service, ...$event }"
-  />
+  <div>
+    <component
+      :is="serviceType.formComponent"
+      v-bind="formProps"
+      @values-changed="values.service = { ...defaultValues.service, ...$event }"
+    />
+    <div v-if="capturesSampleData" class="button-field-action-form__payload">
+      <SampleDataViewer
+        v-if="sampleData"
+        :sample-data="sampleData"
+        :is-error="capturedNothing"
+        :modal-title="
+          $t('databaseWorkflowActionWithService.payloadModalTitle', {
+            actionLabel: workflowActionType.label,
+          })
+        "
+        :modal-subtitle="
+          $t('databaseWorkflowActionWithService.payloadModalSubTitle')
+        "
+      />
+      <Alert v-else type="info-neutral" class="margin-bottom-0">
+        <p>{{ $t('databaseWorkflowActionWithService.nothingCapturedYet') }}</p>
+      </Alert>
+    </div>
+  </div>
 </template>
 
 <script>
 import form from '@baserow/modules/core/mixins/form'
+import SampleDataViewer from '@baserow/modules/core/components/SampleDataViewer'
 import FieldService from '@baserow/modules/database/services/field'
 import { notifyIf } from '@baserow/modules/core/utils/error'
 import { FIELDS_UNAVAILABLE } from '@baserow/modules/database/utils/buttonField'
@@ -15,6 +36,7 @@ import { DatabaseApplicationType } from '@baserow/modules/database/applicationTy
 
 export default {
   name: 'DatabaseWorkflowActionWithService',
+  components: { SampleDataViewer },
   mixins: [form],
   inject: {
     // The sub-form collects these so the data explorer can describe what an
@@ -53,6 +75,35 @@ export default {
     },
     serviceType() {
       return this.workflowActionType.serviceType
+    },
+    // A type whose result only a real answer can describe, so the editor has
+    // something to say about it whether or not a click has answered yet.
+    capturesSampleData() {
+      return this.workflowActionType.capturesSampleData
+    },
+    /**
+     * What the last click remembered, from the saved service rather than the
+     * buffered values: nothing in this editor can produce it. A stored error
+     * describes no shape, so it counts as nothing captured.
+     */
+    /** Why the last click described nothing, when that is what happened. */
+    capturedNothing() {
+      return Boolean(this.defaultValues.service?.sample_data?._error)
+    },
+    sampleData() {
+      const sample = this.defaultValues.service?.sample_data
+      if (!sample) {
+        return null
+      }
+      // A click that answered 404, timed out, or came back too big leaves the
+      // reason instead of a shape. Shown in place of the note asking for a
+      // click that has already happened.
+      if (sample._error) {
+        return sample._error
+      }
+      // What is stored is the whole dispatch result. The explorer's paths
+      // start inside its `data`, so the viewer shows what they name.
+      return sample.data ?? null
     },
     // Delete row has no field mappings, so its form takes neither prop.
     supportsFieldMappings() {

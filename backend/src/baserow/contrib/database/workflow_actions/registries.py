@@ -34,6 +34,14 @@ class DatabaseWorkflowActionType(WorkflowActionType, CustomFieldsInstanceMixin):
     # hands back instead of running server side.
     is_frontend_only = False
 
+    # Set by a type whose result only a real answer can describe. A row action
+    # reads the target table's fields instead.
+    captures_sample_data = False
+
+    # Set by a type that reaches outside this installation. Only clicks that
+    # contain one spend the rate limit's budget.
+    is_external = False
+
     class SerializedDict(DatabaseWorkflowActionDict):
         pass
 
@@ -51,6 +59,22 @@ class DatabaseWorkflowActionType(WorkflowActionType, CustomFieldsInstanceMixin):
         """
 
         return {}
+
+    def unusable_result_reason(self, result: DispatchResult) -> Optional[str]:
+        """
+        Why what the action returned describes no shape, in words the editor
+        can show. Only asked of a type that sets `captures_sample_data`, since
+        what a failure looks like is its own: an HTTP request answers 404 with
+        an error page and still dispatches.
+
+        Must say nothing about the address the action was pointed at, which is
+        for whoever configured the button rather than whoever clicked it.
+
+        :param result: What the action returned.
+        :return: The reason, or `None` when the result describes a real shape.
+        """
+
+        return None
 
     def dispatch(
         self,

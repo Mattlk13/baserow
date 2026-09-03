@@ -390,6 +390,7 @@ import {
   LocalBaserowCreateRowWorkflowActionType,
   LocalBaserowUpdateRowWorkflowActionType,
   LocalBaserowDeleteRowWorkflowActionType,
+  CoreHTTPRequestWorkflowActionType,
 } from '@baserow/modules/database/workflowActionTypes'
 
 export default defineNuxtPlugin({
@@ -1161,6 +1162,10 @@ export default defineNuxtPlugin({
     $registry.register(
       'databaseWorkflowActionType',
       new LocalBaserowDeleteRowWorkflowActionType(context)
+    )
+    $registry.register(
+      'databaseWorkflowActionType',
+      new CoreHTTPRequestWorkflowActionType(context)
     )
 
     $registry.registerNamespace('fieldContextItem')

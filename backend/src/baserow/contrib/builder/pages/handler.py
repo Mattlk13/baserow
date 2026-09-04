@@ -610,6 +610,27 @@ class PageHandler:
             + 1
         )
 
+    def heal_corrupted_graph(self, page: Page) -> Dict[str, Any]:
+        """
+        Reconcile ``page.graph`` with the element rows that actually exist,
+        repairing every known graph corruption class (orphans, stale points,
+        self-references, dangling references, cycles, converging references,
+        invalid children edges and detached points). The page owns the graph,
+        so this is the single healing entry point; the element-aware logic
+        lives in `PageHealingHandler`.
+
+        :param page: The page whose graph should be reconciled.
+        :return: A graph "patch" — the top-level graph entries that changed,
+            keyed by point id — empty when nothing changed. See
+            `PageHealingHandler.heal_corrupted_graph`.
+        """
+
+        from baserow.contrib.builder.pages.healing_handler import (
+            PageHealingHandler,
+        )
+
+        return PageHealingHandler().heal_corrupted_graph(page)
+
     def import_pages(
         self,
         builder: Builder,
@@ -766,6 +787,16 @@ class PageHandler:
             page_instance.path = serialized_page["path"]
             page_instance.path_params = serialized_page["path_params"]
             page_instance.graph = serialized_page.get("graph", {})
+            # Persist the serialized graph now. Unlike the non-shared branch
+            # (which saves via Page.objects.create), the shared page is only
+            # mutated in memory here — but import_elements' migrate_graph takes
+            # a row lock that refreshes the in-memory graph from the committed
+            # row, which would otherwise reset it to the empty graph the shared
+            # page was created with and drop the whole serialized structure
+            # (e.g. a multi-page header's children).
+            page_instance.save(
+                update_fields=["name", "order", "path", "path_params", "graph"]
+            )
         else:
             # Note: serialized pages exported before the page visibility feature
             # will not contain the `visibility`, `role_type` or `roles` keys,

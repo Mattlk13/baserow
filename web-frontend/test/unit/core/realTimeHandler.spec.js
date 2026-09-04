@@ -66,9 +66,9 @@ function makeHandler() {
 }
 
 function fire(handler, type, data) {
-  for (const cb of handler.events[type] || []) {
-    cb(handler.context, data)
-  }
+  return Promise.all(
+    (handler.events[type] || []).map((cb) => cb(handler.context, data))
+  )
 }
 
 describe('RealTimeHandler replay_events flow', () => {
@@ -198,9 +198,141 @@ describe('RealTimeHandler high-water mark', () => {
 })
 
 describe('RealTimeHandler AI provider updates', () => {
+  test('recovers an oversized marker for the loaded workspace scope', async () => {
+    const { handler, store } = makeHandler()
+    store.getters['aiProvider/getWorkspaceId'] = 42
+
+    await fire(handler, 'ai_provider_updated', {
+      type: 'ai_provider_updated',
+      model_availability_updated: true,
+      requires_refresh: true,
+      workspace_id: 42,
+      refresh_workspace_availability: true,
+      refresh_provider_settings: true,
+    })
+
+    expect(store._dispatched).toContainEqual([
+      'workspace/refreshAllGenerativeAIModels',
+      { realtimeRecovery: true },
+    ])
+    expect(store._dispatched).toContainEqual([
+      'aiProvider/fetchInitial',
+      { workspaceId: 42, realtimeRecovery: true },
+    ])
+  })
+
+  test('recovers settings and providers from an oversized instance marker', async () => {
+    const { handler, store } = makeHandler()
+
+    await fire(handler, 'ai_provider_updated', {
+      type: 'ai_provider_updated',
+      model_availability_updated: true,
+      requires_refresh: true,
+      workspace_id: null,
+      refresh_workspace_availability: false,
+      refresh_provider_settings: true,
+    })
+
+    expect(store._dispatched).toContainEqual([
+      'settings/load',
+      { realtimeRecovery: true },
+    ])
+    expect(store._dispatched).toContainEqual([
+      'aiProvider/fetchInitial',
+      { workspaceId: null, realtimeRecovery: true },
+    ])
+  })
+
+  test('does not load provider settings for a different active scope', async () => {
+    const { handler, store } = makeHandler()
+    store.getters['aiProvider/getWorkspaceId'] = 43
+
+    await fire(handler, 'ai_provider_updated', {
+      type: 'ai_provider_updated',
+      model_availability_updated: true,
+      requires_refresh: true,
+      workspace_id: 42,
+      refresh_workspace_availability: true,
+      refresh_provider_settings: true,
+    })
+
+    expect(store._dispatched).toContainEqual([
+      'workspace/refreshAllGenerativeAIModels',
+      { realtimeRecovery: true },
+    ])
+    expect(
+      store._dispatched.some(([name]) => name === 'aiProvider/fetchInitial')
+    ).toBe(false)
+  })
+
+  test('retries a failed instance settings recovery once and consumes the failure', async () => {
+    vi.useFakeTimers()
+    try {
+      const { handler, store } = makeHandler()
+      store.getters['aiProvider/hasLoaded'] = false
+      store.dispatch = vi.fn().mockRejectedValue(new Error('offline'))
+
+      const recovery = fire(handler, 'ai_provider_updated', {
+        type: 'ai_provider_updated',
+        model_availability_updated: true,
+        requires_refresh: true,
+        workspace_id: null,
+        refresh_workspace_availability: false,
+        refresh_provider_settings: true,
+      })
+      await vi.runAllTimersAsync()
+      await expect(recovery).resolves.toEqual([undefined])
+
+      expect(store.dispatch).toHaveBeenCalledTimes(2)
+      expect(store.dispatch).toHaveBeenNthCalledWith(1, 'settings/load', {
+        realtimeRecovery: true,
+      })
+      expect(store.dispatch).toHaveBeenNthCalledWith(2, 'settings/load', {
+        realtimeRecovery: true,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('does not retry provider recovery after its scope is abandoned', async () => {
+    vi.useFakeTimers()
+    try {
+      const { handler, store } = makeHandler()
+      store.getters['aiProvider/getWorkspaceId'] = 42
+      store.dispatch = vi.fn((name) => {
+        if (name === 'aiProvider/fetchInitial') {
+          store.getters['aiProvider/getWorkspaceId'] = 43
+          return Promise.reject(new Error('offline'))
+        }
+        return Promise.resolve()
+      })
+
+      const recovery = fire(handler, 'ai_provider_updated', {
+        type: 'ai_provider_updated',
+        model_availability_updated: false,
+        requires_refresh: true,
+        workspace_id: 42,
+        refresh_workspace_availability: false,
+        refresh_provider_settings: true,
+      })
+      await vi.runAllTimersAsync()
+      await expect(recovery).resolves.toEqual([undefined])
+
+      expect(store.dispatch).toHaveBeenCalledTimes(1)
+      expect(store.dispatch).toHaveBeenCalledWith('aiProvider/fetchInitial', {
+        workspaceId: 42,
+        realtimeRecovery: true,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   test('applies complete instance payloads without fetching', () => {
     const { handler, store } = makeHandler()
     const instanceProviders = [{ id: 1, provider_type: 'openai' }]
+    const instanceFeatureSettings = [{ feature_type: 'kuma', mode: 'disabled' }]
 
     fire(handler, 'ai_provider_updated', {
       type: 'ai_provider_updated',
@@ -209,23 +341,42 @@ describe('RealTimeHandler AI provider updates', () => {
         42: { openai: ['gpt-5'] },
         43: { anthropic: ['claude-4.5'] },
       },
+      ai_features_by_workspace: {
+        42: { kuma: { is_enabled: true, state: 'configured' } },
+        43: { kuma: { is_enabled: false, state: 'disabled' } },
+      },
+      instance_ai_features: { kuma: { is_enabled: true } },
       instance_ai_providers: instanceProviders,
+      instance_ai_provider_feature_settings: instanceFeatureSettings,
     })
 
     expect(store._dispatched).toContainEqual([
+      'settings/forceUpdateAIFeatures',
+      { kuma: { is_enabled: true } },
+    ])
+    expect(store._dispatched).toContainEqual([
       'workspace/forceUpdateGenerativeAIModels',
-      { workspaceId: 42, generativeAIModelsEnabled: { openai: ['gpt-5'] } },
+      {
+        workspaceId: 42,
+        generativeAIModelsEnabled: { openai: ['gpt-5'] },
+        aiFeatures: { kuma: { is_enabled: true, state: 'configured' } },
+      },
     ])
     expect(store._dispatched).toContainEqual([
       'workspace/forceUpdateGenerativeAIModels',
       {
         workspaceId: 43,
         generativeAIModelsEnabled: { anthropic: ['claude-4.5'] },
+        aiFeatures: { kuma: { is_enabled: false, state: 'disabled' } },
       },
     ])
     expect(store._dispatched).toContainEqual([
       'aiProvider/replaceFromRealtime',
-      { workspaceId: null, providers: instanceProviders },
+      {
+        workspaceId: null,
+        providers: instanceProviders,
+        featureSettings: instanceFeatureSettings,
+      },
     ])
     expect(store._dispatched).not.toContainEqual([
       'workspace/refreshAllGenerativeAIModels',
@@ -240,6 +391,7 @@ describe('RealTimeHandler AI provider updates', () => {
   test('applies the loaded workspace provider snapshot without fetching', () => {
     const { handler, store } = makeHandler()
     const workspaceProviders = [{ id: 2, provider_type: 'anthropic' }]
+    const workspaceFeatureSettings = [{ feature_type: 'kuma', mode: 'inherit' }]
     store.getters['aiProvider/getWorkspaceId'] = 42
 
     fire(handler, 'ai_provider_updated', {
@@ -248,12 +400,22 @@ describe('RealTimeHandler AI provider updates', () => {
       generative_ai_models_enabled_by_workspace: {
         42: { openai: ['gpt-5'] },
       },
+      ai_features_by_workspace: {
+        42: { kuma: { is_enabled: true, state: 'inherited' } },
+      },
       ai_providers_by_workspace: { 42: workspaceProviders },
+      ai_provider_feature_settings_by_workspace: {
+        42: workspaceFeatureSettings,
+      },
     })
 
     expect(store._dispatched).toContainEqual([
       'workspace/forceUpdateGenerativeAIModels',
-      { workspaceId: 42, generativeAIModelsEnabled: { openai: ['gpt-5'] } },
+      {
+        workspaceId: 42,
+        generativeAIModelsEnabled: { openai: ['gpt-5'] },
+        aiFeatures: { kuma: { is_enabled: true, state: 'inherited' } },
+      },
     ])
     expect(store._dispatched).not.toContainEqual([
       'workspace/refreshAllGenerativeAIModels',
@@ -261,7 +423,11 @@ describe('RealTimeHandler AI provider updates', () => {
     ])
     expect(store._dispatched).toContainEqual([
       'aiProvider/replaceFromRealtime',
-      { workspaceId: 42, providers: workspaceProviders },
+      {
+        workspaceId: 42,
+        providers: workspaceProviders,
+        featureSettings: workspaceFeatureSettings,
+      },
     ])
     expect(store._dispatched).not.toContainEqual([
       'aiProvider/refresh',
@@ -272,11 +438,13 @@ describe('RealTimeHandler AI provider updates', () => {
   test('provider metadata changes apply their snapshot without fetching', () => {
     const { handler, store } = makeHandler()
     const instanceProviders = [{ id: 1, provider_type: 'openai' }]
+    const instanceFeatureSettings = [{ feature_type: 'kuma', mode: 'disabled' }]
 
     fire(handler, 'ai_provider_updated', {
       type: 'ai_provider_updated',
       model_availability_updated: false,
       instance_ai_providers: instanceProviders,
+      instance_ai_provider_feature_settings: instanceFeatureSettings,
     })
 
     expect(store._dispatched).not.toContainEqual([
@@ -285,7 +453,11 @@ describe('RealTimeHandler AI provider updates', () => {
     ])
     expect(store._dispatched).toContainEqual([
       'aiProvider/replaceFromRealtime',
-      { workspaceId: null, providers: instanceProviders },
+      {
+        workspaceId: null,
+        providers: instanceProviders,
+        featureSettings: instanceFeatureSettings,
+      },
     ])
     expect(store._dispatched).not.toContainEqual([
       'aiProvider/refresh',
@@ -293,19 +465,38 @@ describe('RealTimeHandler AI provider updates', () => {
     ])
   })
 
-  test('does not refresh provider administration before it has been loaded', () => {
+  test('captures a provider snapshot while the initial load is in flight', () => {
     const { handler, store } = makeHandler()
     store.getters['aiProvider/hasLoaded'] = false
+    const providers = [{ id: 1, provider_type: 'openai' }]
 
     fire(handler, 'ai_provider_updated', {
       type: 'ai_provider_updated',
       model_availability_updated: false,
-      instance_ai_providers: [{ id: 1, provider_type: 'openai' }],
+      instance_ai_providers: providers,
     })
 
-    expect(store._dispatched).not.toContainEqual([
+    expect(store._dispatched).toContainEqual([
       'aiProvider/replaceFromRealtime',
-      expect.anything(),
+      {
+        workspaceId: null,
+        providers,
+        featureSettings: undefined,
+      },
+    ])
+  })
+
+  test('updates instance AI feature settings whenever the payload provides them', () => {
+    const { handler, store } = makeHandler()
+
+    fire(handler, 'ai_provider_updated', {
+      type: 'ai_provider_updated',
+      instance_ai_features: { kuma: { is_enabled: false } },
+    })
+
+    expect(store._dispatched).toContainEqual([
+      'settings/forceUpdateAIFeatures',
+      { kuma: { is_enabled: false } },
     ])
   })
 })

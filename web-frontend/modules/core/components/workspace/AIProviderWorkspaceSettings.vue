@@ -2,17 +2,11 @@
   <div class="ai-provider-workspace-settings">
     <header class="ai-provider-admin__header">
       <div>
-        <h2 class="box__title">
+        <h2>
           {{ $t('generativeAIWorkspaceSettings.providerTitle') }}
         </h2>
         <p>{{ $t('generativeAIWorkspaceSettings.providerDescription') }}</p>
       </div>
-    </header>
-
-    <div
-      v-if="loaded && !loading && !initialLoadFailed"
-      class="ai-provider-workspace-settings__toolbar"
-    >
       <Button
         icon="iconoir-plus"
         :disabled="availableProviderTypes.length === 0"
@@ -20,7 +14,12 @@
       >
         {{ $t('aiProviderAdmin.addProvider') }}
       </Button>
-    </div>
+    </header>
+
+    <AIProviderFeatureSettings
+      v-if="loaded && !loading && !initialLoadFailed"
+      :workspace-id="workspace.id"
+    />
 
     <div
       v-if="loading || (!loaded && !initialLoadFailed)"
@@ -148,14 +147,17 @@
 
 <script>
 import AIProviderConfirmModal from '@baserow/modules/core/components/ai/AIProviderConfirmModal'
+import AIProviderFeatureSettings from '@baserow/modules/core/components/ai/AIProviderFeatureSettings'
 import AIProviderFormModal from '@baserow/modules/core/components/ai/AIProviderFormModal'
 import AIProviderItem from '@baserow/modules/core/components/ai/AIProviderItem'
 import AIProviderModelFormModal from '@baserow/modules/core/components/ai/AIProviderModelFormModal'
+import { aiProviderErrorMessage } from '@baserow/modules/core/utils/aiProvider'
 
 export default {
   name: 'AIProviderWorkspaceSettings',
   components: {
     AIProviderConfirmModal,
+    AIProviderFeatureSettings,
     AIProviderFormModal,
     AIProviderItem,
     AIProviderModelFormModal,
@@ -416,9 +418,7 @@ export default {
       } catch (error) {
         this.$store.dispatch('toast/error', {
           title: this.$t('aiProviderAdmin.actionError'),
-          message:
-            error.response?.data?.detail?.message ||
-            error.response?.data?.detail,
+          message: aiProviderErrorMessage(error),
         })
         return false
       } finally {

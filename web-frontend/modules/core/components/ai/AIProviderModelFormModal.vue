@@ -40,6 +40,10 @@
         <MarkdownIt :content="modelIdentifierDescription" />
       </template>
     </FormGroup>
+    <AIProviderModelFeatureSelector
+      v-model="values.feature_types"
+      class="margin-bottom-2"
+    />
     <div class="actions">
       <ul class="action__links">
         <li>
@@ -55,11 +59,13 @@
 
 <script>
 import AIProviderModelCombobox from '@baserow/modules/core/components/ai/AIProviderModelCombobox'
+import AIProviderModelFeatureSelector from '@baserow/modules/core/components/ai/AIProviderModelFeatureSelector'
 import modal from '@baserow/modules/core/mixins/modal'
+import { aiProviderErrorMessage } from '@baserow/modules/core/utils/aiProvider'
 
 export default {
   name: 'AIProviderModelFormModal',
-  components: { AIProviderModelCombobox },
+  components: { AIProviderModelCombobox, AIProviderModelFeatureSelector },
   mixins: [modal],
   props: {
     provider: { type: Object, required: true },
@@ -78,6 +84,11 @@ export default {
       discoveredModels: [],
       values: {
         model_identifier: this.model?.model_identifier || '',
+        feature_types:
+          this.model?.feature_types ||
+          this.$registry
+            .getOrderedList('aiProviderModelFeature')
+            .map((feature) => feature.getType()),
       },
     }
   },
@@ -145,6 +156,7 @@ export default {
       this.loading = true
       const values = {
         model_identifier: this.values.model_identifier.trim(),
+        feature_types: this.values.feature_types,
       }
       try {
         const result = this.model
@@ -165,10 +177,11 @@ export default {
         this.$emit('saved', result)
         this.hide()
       } catch (error) {
-        const errorCode = error.response?.data?.error
-        const detail = error.response?.data?.detail
-        const errorMessage = detail?.message || detail
-        if (errorCode === 'ERROR_AI_PROVIDER_MODEL_ALREADY_CONFIGURED') {
+        const errorMessage = aiProviderErrorMessage(error)
+        if (
+          error.response?.data?.error ===
+          'ERROR_AI_PROVIDER_MODEL_ALREADY_CONFIGURED'
+        ) {
           this.modelIdentifierError = errorMessage
           return
         }

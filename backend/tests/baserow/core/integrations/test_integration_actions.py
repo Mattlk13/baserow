@@ -3,6 +3,7 @@ import uuid
 import pytest
 
 from baserow.core.action.handler import ActionHandler
+from baserow.core.action.models import Action
 from baserow.core.action.scopes import ApplicationActionScopeType
 from baserow.core.integrations.actions import (
     CreateIntegrationActionType,
@@ -214,3 +215,52 @@ def test_integration_grouped_create_configure_undo_redo(data_fixture):
     assert Integration.objects.filter(id=integration.id).exists()
     integration.refresh_from_db()
     assert integration.name == "Configured"
+
+
+@pytest.mark.django_db
+@pytest.mark.undo_redo
+def test_update_smtp_integration_action_does_not_log_the_password(data_fixture):
+    """
+    The credential and the connection targets it protects stay out of the
+    action log. A replay carries no credential, so a recorded target change
+    could re-point whatever password happens to be stored at the time.
+    """
+
+    session_id = str(uuid.uuid4())
+    user = data_fixture.create_user(session_id=session_id)
+    application = data_fixture.create_builder_application(user=user)
+    integration = data_fixture.create_smtp_integration(
+        user=user, application=application, password="secret"
+    )
+
+    UpdateIntegrationActionType.do(
+        user, integration, host="smtp.changed.com", password="newsecret"
+    )
+
+    logged = Action.objects.filter(type=UpdateIntegrationActionType.type).last()
+    for params in ("integration_original_params", "integration_new_params"):
+        assert "password" not in logged.params[params]
+        assert "host" not in logged.params[params]
+
+
+@pytest.mark.django_db
+@pytest.mark.undo_redo
+def test_update_smtp_integration_username_can_be_undone_and_redone(data_fixture):
+    session_id = str(uuid.uuid4())
+    user = data_fixture.create_user(session_id=session_id)
+    application = data_fixture.create_builder_application(user=user)
+    integration = data_fixture.create_smtp_integration(
+        user=user, application=application, username="old", password="secret"
+    )
+
+    UpdateIntegrationActionType.do(user, integration, username="new")
+
+    ActionHandler.undo(user, _scope(application), session_id)
+    integration.refresh_from_db()
+    assert integration.username == "old"
+    assert integration.password == "secret"
+
+    ActionHandler.redo(user, _scope(application), session_id)
+    integration.refresh_from_db()
+    assert integration.username == "new"
+    assert integration.password == "secret"

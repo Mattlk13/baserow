@@ -44,6 +44,7 @@ from baserow.core.cache import local_cache
 from baserow.core.db import specific_iterator
 from baserow.core.graph.handler import BaseGraphHandler
 from baserow.core.graph.types import GraphPointPosition, GraphPointPositionType
+from baserow.core.registries import ImportExportConfig
 from baserow.core.storage import ExportZipFile
 from baserow.core.telemetry.utils import baserow_trace_handler
 from baserow.core.utils import MirrorDict, extract_allowed
@@ -601,6 +602,16 @@ class ElementHandler:
         """
 
         workflow_actions_duplicated = []
+        # Service types read `is_duplicate` to keep ids the mapping does not
+        # remap, such as the workflow an action starts or the table it writes
+        # to. A duplicate stays on this instance, so those ids still refer to
+        # the right objects; a file import would drop them.
+        import_export_config = ImportExportConfig(
+            include_permission_data=True,
+            reduce_disk_space_usage=False,
+            exclude_sensitive_data=False,
+            is_duplicate=True,
+        )
 
         for workflow_action in self.get_element_workflow_actions(element):
             workflow_action_type = builder_workflow_action_type_registry.get_by_model(
@@ -610,7 +621,10 @@ class ElementHandler:
                 workflow_action
             )
             workflow_action_duplicated = workflow_action_type.import_serialized(
-                element.page, workflow_action_serialized, id_mapping
+                element.page,
+                workflow_action_serialized,
+                id_mapping,
+                import_export_config=import_export_config,
             )
 
             workflow_actions_duplicated.append(workflow_action_duplicated)

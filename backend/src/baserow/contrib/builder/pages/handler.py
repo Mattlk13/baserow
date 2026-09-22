@@ -49,6 +49,7 @@ from baserow.contrib.builder.workflow_actions.handler import (
 from baserow.core.cache import global_cache
 from baserow.core.exceptions import IdDoesNotExist
 from baserow.core.psycopg import is_unique_violation_error
+from baserow.core.registries import ImportExportConfig
 from baserow.core.storage import ExportZipFile
 from baserow.core.telemetry.utils import baserow_trace_handler
 from baserow.core.user_sources.user_source_user import UserSourceUser
@@ -359,6 +360,16 @@ class PageHandler:
             exported_page,
             progress=progress.create_child_builder(represents_progress=import_progress),
             id_mapping=id_mapping,
+            # Service types read `is_duplicate` to keep ids the mapping does
+            # not remap, such as the workflow an action starts or the table it
+            # writes to. A duplicate stays on this instance, so those ids still
+            # refer to the right objects; a file import would drop them.
+            import_export_config=ImportExportConfig(
+                include_permission_data=True,
+                reduce_disk_space_usage=False,
+                exclude_sensitive_data=False,
+                is_duplicate=True,
+            ),
         )
 
         return new_page_clone
@@ -648,6 +659,7 @@ class PageHandler:
         storage: Optional[Storage] = None,
         progress: Optional[ChildProgressBuilder] = None,
         cache: Optional[Dict[str, Any]] = None,
+        import_export_config: Optional[ImportExportConfig] = None,
     ):
         """
         Import multiple pages at once. Especially useful when we have dependencies
@@ -662,6 +674,8 @@ class PageHandler:
         :param storage: Storage to get the files from.
         :param progress: A progress object that can be used to report progress.
         :param cache: A cache to use for the import.
+        :param import_export_config: What kind of import this is. The workflow
+            actions read it to know which of their references to keep.
         :return: the newly created instances.
         """
 
@@ -732,6 +746,7 @@ class PageHandler:
                 storage=storage,
                 progress=progress,
                 cache=cache,
+                import_export_config=import_export_config,
             )
 
         return [i[0] for i in imported_pages]
@@ -745,6 +760,7 @@ class PageHandler:
         storage: Optional[Storage] = None,
         progress: Optional[ChildProgressBuilder] = None,
         cache: Optional[Dict[str, any]] = None,
+        import_export_config: Optional[ImportExportConfig] = None,
     ):
         """
         Creates an instance using the serialized version previously exported with
@@ -758,6 +774,7 @@ class PageHandler:
         :param storage: Storage to get the files from.
         :param progress: A progress object that can be used to report progress.
         :param cache: A cache to use for the import.
+        :param import_export_config: What kind of import this is.
         :return: the newly created instance.
         """
 
@@ -769,6 +786,7 @@ class PageHandler:
             storage=storage,
             progress=progress,
             cache=cache,
+            import_export_config=import_export_config,
         )[0]
 
     def import_page_only(

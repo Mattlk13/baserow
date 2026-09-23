@@ -1,14 +1,16 @@
 <template>
   <template v-if="isClientReady">
-    <component
-      :is="chartComponent"
-      v-if="hasChartData"
-      id="chart-id"
-      :key="chartRenderKey"
-      :options="chartOptions"
-      :data="data"
-      class="chart"
-    />
+    <div v-if="hasChartData" ref="chartContainer" class="chart__container">
+      <component
+        :is="chartComponent"
+        id="chart-id"
+        :key="chartRenderKey"
+        ref="chart"
+        :options="chartOptions"
+        :data="data"
+        class="chart"
+      />
+    </div>
 
     <div v-else class="chart__no-data">
       <span class="chart__no-data-dashed-line"></span>
@@ -98,6 +100,9 @@ export default {
   data() {
     return {
       isClientReady: false,
+      chartResizeObserver: null,
+      observedChartContainer: null,
+      chartSize: null,
     }
   },
   computed: {
@@ -113,7 +118,7 @@ export default {
     },
     chartOptions() {
       const options = {
-        responsive: true,
+        responsive: false,
         maintainAspectRatio: false,
         plugins: {
           legend: {
@@ -190,16 +195,57 @@ export default {
       return this.mergeOptions(options, this.options)
     },
   },
+  watch: {
+    chartRenderKey() {
+      this.$nextTick(() => this.resizeChart())
+    },
+    hasChartData() {
+      this.$nextTick(() => this.observeChartContainer())
+    },
+  },
   mounted() {
     this.isClientReady = true
     this.emitRendered()
+    this.$nextTick(() => this.observeChartContainer())
   },
   updated() {
     if (this.isClientReady) {
       this.emitRendered()
     }
   },
+  beforeUnmount() {
+    this.chartResizeObserver?.disconnect()
+  },
   methods: {
+    observeChartContainer() {
+      const chartContainer = this.$refs.chartContainer
+
+      if (chartContainer === this.observedChartContainer) {
+        return
+      }
+
+      this.chartResizeObserver?.disconnect()
+      this.observedChartContainer = chartContainer || null
+
+      if (!chartContainer || typeof ResizeObserver === 'undefined') {
+        return
+      }
+
+      this.chartResizeObserver = new ResizeObserver(([entry]) => {
+        const { width, height } = entry.contentRect
+        this.chartSize = { width, height }
+        this.resizeChart()
+      })
+      this.chartResizeObserver.observe(chartContainer)
+    },
+    resizeChart() {
+      if (!this.chartSize) {
+        return
+      }
+
+      const { width, height } = this.chartSize
+      this.$refs.chart?.chart?.resize(width, height)
+    },
     mergeOptions(base, override) {
       if (!override) {
         return base

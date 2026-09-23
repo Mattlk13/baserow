@@ -77,7 +77,6 @@ from baserow.core.telemetry.utils import (
     baserow_trace_phase,
 )
 from baserow.core.trash.handler import TrashHandler
-from baserow.core.types import PermissionCheck
 
 # What a failed external action tells the clicker. The service's own message
 # names the URL it could not reach, which is where an API key would be.
@@ -705,20 +704,14 @@ class DatabaseWorkflowActionService:
         if not workflow_actions:
             return WorkflowActionsDispatchResult()
 
-        # Checked over every action, frontend-only included, so a click is
-        # refused as a whole (ADR 006 section 7), and before the lock is taken,
-        # so a refused user never holds it.
-        CoreHandler().check_multiple_permissions(
-            [
-                PermissionCheck(
-                    user,
-                    DispatchDatabaseWorkflowActionOperationType.type,
-                    workflow_action,
-                )
-                for workflow_action in workflow_actions
-            ],
+        # Asked of the field, so it covers every action, frontend-only
+        # included, and a click is refused as a whole (ADR 006 section 7).
+        # Before the lock is taken, so a refused user never holds it.
+        CoreHandler().check_permissions(
+            user,
+            DispatchDatabaseWorkflowActionOperationType.type,
             workspace=field.table.database.workspace,
-            raise_exception=True,
+            context=field,
         )
 
         # Refused as a whole: a sequence that cannot finish should not start.
@@ -923,12 +916,20 @@ class DatabaseWorkflowActionService:
                                 workflow_action.id,
                                 EXTERNAL_DISPATCH_FAILED_MESSAGE,
                                 positions[workflow_action.id],
+                                completed=[
+                                    positions[done.workflow_action.id]
+                                    for done in dispatched
+                                ],
                             ) from exc
                         if isinstance(exc, USER_FACING_DISPATCH_EXCEPTIONS):
                             raise WorkflowActionDispatchError(
                                 workflow_action.id,
                                 str(exc),
                                 positions[workflow_action.id],
+                                completed=[
+                                    positions[done.workflow_action.id]
+                                    for done in dispatched
+                                ],
                             ) from exc
                         raise exc
                     if is_external and on_external_dispatch:

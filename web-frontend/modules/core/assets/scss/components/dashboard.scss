@@ -62,6 +62,12 @@
   gap: 24px;
 }
 
+.dashboard__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .dashboard__wrapper {
   flex-grow: 1;
 }
@@ -70,7 +76,15 @@
   display: flex;
   flex-direction: column;
   gap: 32px;
+
+  // The resources switch layout on the width of this box rather than the
+  // viewport, because the assistant sidebar can take a large part of it.
+  container-type: inline-size;
 }
+
+// The narrowest box in which a single row of the five resource cards leaves
+// each card the 196px its longest word needs.
+$dashboard-resources-row-min-width: 1044px;
 
 .dashboard__no-application {
   border-radius: 6px;
@@ -87,59 +101,36 @@
   display: flex;
   flex-direction: column;
   gap: 24px;
+
+  // Below the items, unless the cards fit in a single row above them.
   order: 1;
 
-  @media screen and (min-width: 1280px) {
-    flex-direction: row;
+  @container (min-width: #{$dashboard-resources-row-min-width}) {
     order: 0;
-  }
-}
-
-.dashboard__suggested-templates {
-  @media screen and (min-width: 1280px) {
-    width: 50%;
-  }
-}
-
-.dashboard__suggested-templates-wrapper {
-  background: $palette-neutral-50;
-  padding: 24px;
-  height: calc(100% - 33px);
-
-  @include flex-align-items(16px);
-  @include rounded($rounded-md);
-
-  @media screen and (min-width: 1280px) {
-    order: 1;
-  }
-}
-
-.dashboard__suggested-template {
-  flex: 1 1 0;
-}
-
-.dashboard__resources {
-  @media screen and (min-width: 1280px) {
-    width: 50%;
   }
 }
 
 .dashboard__resources-wrapper {
   display: grid;
   gap: 16px;
-  height: calc(100% - 33px);
-  grid-template-columns: repeat(1, 1fr);
+  grid-template-columns: minmax(0, 1fr);
 
-  @media screen and (min-width: 768px) {
-    grid-template-columns: repeat(2, 1fr);
+  // Either every card side by side or every card stacked, never a partial row.
+  @container (min-width: #{$dashboard-resources-row-min-width}) {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    grid-template-columns: none;
   }
 }
 
 .dashboard__resource {
   border: 1px solid $palette-neutral-200;
-  padding: 21px;
+  padding: 16px 21px;
   text-decoration: none;
   display: flex;
+
+  // The templates resource opens a modal instead of following a link.
+  cursor: pointer;
 
   @include rounded($rounded-md);
   @include elevation($elevation-low);

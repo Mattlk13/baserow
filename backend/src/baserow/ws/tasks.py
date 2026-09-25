@@ -163,9 +163,12 @@ async def send_messages_to_channel_group(
     ``ChannelGroupMessage`` is accepted as well as a list, so callers that
     only have one message don't have to wrap it themselves. When event
     recording is enabled, all recordable messages (those carrying a
-    ``payload`` or ``payload_map``) are persisted in a single batch (one
-    ``bulk_create`` instead of one insert per message) and their ids are
-    injected into the inner payload(s) **before** the messages are sent.
+    ``payload`` or ``payload_map`` and not marked ``record: False``) are
+    persisted in a single batch (one ``bulk_create`` instead of one insert per
+    message) and their ids are injected into the inner payload(s) **before**
+    the messages are sent. A message that a reconnecting client can do without
+    should opt out, because every recorded event counts toward the replay
+    limit after which the client is forced to refresh.
 
     :param channel_layer: The channel layer instance to use.
     :param messages: A single ``ChannelGroupMessage`` or a list of them.
@@ -180,8 +183,11 @@ async def send_messages_to_channel_group(
         recordable = [
             channel_group_message
             for channel_group_message in messages
-            if channel_group_message.message.get("payload") is not None
-            or channel_group_message.message.get("payload_map") is not None
+            if channel_group_message.message.get("record", True)
+            and (
+                channel_group_message.message.get("payload") is not None
+                or channel_group_message.message.get("payload_map") is not None
+            )
         ]
         if recordable:
             event_ids = await run_database_sync(
@@ -207,6 +213,7 @@ def broadcast_to_users(
     payload: Dict[str, Any],
     ignore_web_socket_id: Optional[str] = None,
     send_to_all_users: bool = False,
+    record: bool = True,
 ):
     """
     Broadcasts a JSON payload the provided users.
@@ -220,6 +227,8 @@ def broadcast_to_users(
     :param send_to_all_users: If set to True all users will be sent the payload and
         the user_ids parameter will be ignored. ignore_web_socket_id however will still
         be respected.
+    :param record: Whether the event is kept for replay to reconnecting clients.
+        Pass False for events a fresh page load makes redundant anyway.
     """
 
     channel_layer = get_channel_layer()
@@ -233,6 +242,7 @@ def broadcast_to_users(
                 "payload": payload,
                 "ignore_web_socket_id": ignore_web_socket_id,
                 "send_to_all_users": send_to_all_users,
+                "record": record,
             },
         ),
     )
@@ -804,6 +814,7 @@ def broadcast_application_created(
         PolymorphicApplicationResponseSerializer,
     )
     from baserow.core.handler import CoreHandler
+    from baserow.core.last_viewed.handler import LastViewedHandler
     from baserow.core.models import Application, WorkspaceUser
     from baserow.core.operations import ReadApplicationOperationType
 
@@ -831,12 +842,21 @@ def broadcast_application_created(
     ]
 
     users_in_workspace_id_map = {user.id: user for user in users_in_workspace}
+    # Payloads are per user, so the restore of a trashed application can carry
+    # the value the user had before.
+    last_viewed_per_user = LastViewedHandler.get_last_viewed_per_user_and_application(
+        [application.id], user_ids
+    )
 
     payload_map = {}
     for user_id in user_ids:
         user = users_in_workspace_id_map[user_id]
         application_serialized = PolymorphicApplicationResponseSerializer(
-            application, context={"user": user}
+            application,
+            context={
+                "user": user,
+                "last_viewed_per_application": last_viewed_per_user.get(user_id, {}),
+            },
         ).data
 
         payload_map[str(user_id)] = {

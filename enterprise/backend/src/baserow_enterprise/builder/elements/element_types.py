@@ -315,21 +315,30 @@ class FileInputElementType(InputElementType):
     def is_allowed_content_type(
         self, element: FileInputElement, content_type: str
     ) -> bool:
-        allowed_filetypes = element.allowed_filetypes
+        allowed_filetypes = [t.lower() for t in element.allowed_filetypes]
 
         if not allowed_filetypes:
             return True
 
+        # Some clients/configurations use image/jpg for the image/jpeg MIME type.
+        mime_aliases = {"image/jpg": "image/jpeg"}
+        content_type = content_type.lower()
+        content_type = mime_aliases.get(content_type, content_type)
         extensions = mimetypes.guess_all_extensions(content_type)
 
         for allowed_type in allowed_filetypes:
-            # special cases for media
-            if allowed_type == "image/*" and content_type.startswith("image/"):
-                return True
-            if allowed_type == "video/*" and content_type.startswith("video/"):
-                return True
-            if allowed_type == "audio/*" and content_type.startswith("audio/"):
-                return True
+            if "/" in allowed_type:
+                allowed_mime_type = mime_aliases.get(allowed_type, allowed_type)
+                if allowed_mime_type == content_type:
+                    return True
+                major_type, subtype = allowed_mime_type.split("/", 1)
+                if (
+                    major_type
+                    and "*" not in major_type
+                    and subtype == "*"
+                    and content_type.startswith(f"{major_type}/")
+                ):
+                    return True
             # Users are not expected to add the dot...
             if f".{allowed_type}" in extensions:
                 return True

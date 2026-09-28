@@ -31,8 +31,9 @@
         "home": "Domů",
         "adminSettings": "Nastavení správce",
         "general": "Obecné",
-        "people": "Uživatelé",
-        "licenses": "Licence"
+        "people": "Lidé",
+        "licenses": "Licence",
+        "replayGuidedTour": "Znovu spustit průvodce"
     },
     "accountForm": {
         "nameLabel": "Vaše jméno",
@@ -62,9 +63,9 @@
     },
     "error": {
         "alreadyExistsTitle": "Uživatel již existuje",
-        "alreadyExistsMessage": "Uživatel s danou emailovou adresou již existuje.",
+        "alreadyExistsMessage": "Uživatel s danou e-mailovou adresou již existuje.",
         "passwordRequired": "Heslo je povinné.",
-        "invalidEmail": "Prosím zadejte platnou emailovou adresu.",
+        "invalidEmail": "Prosím zadejte platnou e-mailovou adresu.",
         "disabledAccountTitle": "Účet je zakázán",
         "disabledAccountMessage": "Tento uživatelský účet byl zakázán.",
         "incorrectCredentialTitle": "Nesprávné přihlašovací údaje",
@@ -257,7 +258,9 @@
         "addNew": "Přidat nové...",
         "noWorkspace": "Žádný pracovní prostor",
         "noWorkspaceDescription": "Začněte vytvořením nového pracovního prostoru",
-        "starOnGitHub": "Označte nás hvězdičkou na GitHubu"
+        "starOnGitHub": "Označte nás hvězdičkou na GitHubu",
+        "academy": "Akademie Baserow",
+        "academyMessage": "Absolvujte kurzy a staňte se odborníky"
     },
     "login": {
         "title": "Vítejte zpět",
@@ -781,7 +784,8 @@
         "failedTitle": "Něco se pokazilo",
         "failedDescription": "Úvodní nastavení se nedokončilo úplně, i když některé části mohly být dokončeny.",
         "failedTryAgain": "Zkusit znovu",
-        "failedSkip": "Přeskočit úvodní nastavení"
+        "failedSkip": "Přeskočit úvodní nastavení",
+        "back": "Zpět"
     },
     "moreStep": {
         "title": "Řekněte nám o sobě něco více",
@@ -1002,7 +1006,9 @@
         "step": "{step} z {totalSteps}",
         "gotIt": "Rozumím",
         "next": "Další",
-        "back": "Zpět"
+        "back": "Zpět",
+        "watchVideo": "Přehrát video",
+        "stopTour": "Ukončit průvodce"
     },
     "welcomeGuidedTourStep": {
         "title": "Vítejte v Baserow",
@@ -1309,5 +1315,13 @@
         "files": "Soubory",
         "http": "HTTP",
         "workflow": "Pracovní postup"
+    },
+    "academy": {
+        "learnMore": "Zjistěte více v akademii Baserow"
+    },
+    "guidedTourVideoModal": {
+        "previous": "Předchozí video",
+        "next": "Další video",
+        "close": "Zavřít"
     }
 }

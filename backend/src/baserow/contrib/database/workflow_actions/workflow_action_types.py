@@ -690,6 +690,18 @@ class CoreHTTPRequestWorkflowActionType(DatabaseWorkflowServiceActionType):
             )
         return "The last click was not answered with anything describable."
 
+    def failed_result_reason(self, result: DispatchResult) -> Optional[str]:
+        data = result.data if isinstance(result.data, dict) else {}
+        status_code = data.get("status_code")
+
+        if not isinstance(status_code, int) or status_code < 400:
+            return None
+        # The service answers a timeout with a 504 of its own, so a 504 can be
+        # either.
+        if status_code == 504:
+            return "the request timed out or was answered with status 504"
+        return f"the request was answered with status {status_code}"
+
 
 class CoreSMTPEmailWorkflowActionType(DatabaseWorkflowServiceActionType):
     type = "smtp_email"

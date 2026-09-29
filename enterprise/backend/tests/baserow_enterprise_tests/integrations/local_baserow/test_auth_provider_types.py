@@ -394,7 +394,6 @@ def test_local_baserow_token_auth_with_trashed_integration(api_client, data_fixt
 
 @pytest.mark.django_db
 @override_settings(
-    BASEROW_APPLICATION_USER_LIMIT_ENFORCED=True,
     BASEROW_APPLICATION_USER_LIMIT_GRACE_PERIOD_HOURS=1,
 )
 @patch(

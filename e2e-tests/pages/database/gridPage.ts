@@ -665,6 +665,42 @@ export class GridPage {
     await input.blur();
   }
 
+  floatingAddRowButton(): Locator {
+    return this.gridRoot().locator(".button-floating");
+  }
+
+  async expectFloatingAddRowButtonAboveFooter(): Promise<void> {
+    const button = await this.floatingAddRowButton().boundingBox();
+    const footer = await this.page
+      .locator(".grid-view__foot")
+      .first()
+      .boundingBox();
+    expect(button).not.toBeNull();
+    expect(footer).not.toBeNull();
+    expect(footer!.y - (button!.y + button!.height)).toBeCloseTo(20, 0);
+  }
+
+  async openCreateRowModal(): Promise<void> {
+    await this.floatingAddRowButton().click();
+    await expect(this.rowEditModal()).toBeVisible({ timeout: 10_000 });
+  }
+
+  async submitCreateRowModal(): Promise<void> {
+    await this.rowEditModal()
+      .getByRole("button", { name: "Create", exact: true })
+      .click();
+  }
+
+  async expectRowModalClosed(): Promise<void> {
+    await expect(this.rowEditModal()).toHaveCount(0, { timeout: 10_000 });
+  }
+
+  async expectRowModalError(): Promise<void> {
+    await expect(this.rowEditModal().locator(".alert--error")).toBeVisible({
+      timeout: 10_000,
+    });
+  }
+
   private escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
@@ -928,6 +964,19 @@ export class GridPage {
     await expect(this.selectedPrimaryCellAt(rowIndex)).toBeVisible({
       timeout: 5_000,
     });
+  }
+
+  async expectPrimaryNotSelected(rowIndex: number): Promise<void> {
+    await expect(this.selectedPrimaryCellAt(rowIndex)).toHaveCount(0, {
+      timeout: 5_000,
+    });
+  }
+
+  async expectFooterRowCount(count: number): Promise<void> {
+    await expect(this.page.locator(".grid-view__foot-info")).toHaveText(
+      `${count} rows`,
+      { timeout: 10_000 },
+    );
   }
 
   async expectFieldSelected(

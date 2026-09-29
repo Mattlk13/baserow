@@ -58,6 +58,39 @@ backendSecrets:
   REDIS_PASSWORD: "password"
 ```
 
+## Inbound email receiver
+
+Enable the email receiver to use the "Start workflow by email" automation
+trigger. The chart creates a persistent volume for mox, an internal web API
+service used by the backend, and a `LoadBalancer` service which exposes SMTP on
+port 25.
+
+```yaml
+baserow-email-receiver:
+  enabled: true
+
+backendConfigMap:
+  BASEROW_INBOUND_EMAIL_DOMAIN: inbound.example.com
+
+backendSecrets:
+  BASEROW_INBOUND_EMAIL_WEBHOOK_SECRET: replace-with-a-long-random-secret
+```
+
+Point the MX record for `inbound.example.com` to the external address of the
+`<release>-baserow-email-receiver-smtp` service. If the MX record points to a
+different hostname, like `mx.inbound.example.com`, set
+`BASEROW_INBOUND_EMAIL_SMTP_HOSTNAME` to that hostname in `backendConfigMap`.
+The SMTP service type, annotations, port, and persistent storage settings can
+all be overridden under `baserow-email-receiver`.
+
+The SMTP service uses `externalTrafficPolicy: Local` so mox sees the real
+sender IP, which it needs to evaluate SPF and DMARC correctly. The mox data
+volume is kept when the release is uninstalled because it holds the webhook
+retry queue; delete the `<release>-baserow-email-receiver` PVC manually if you
+no longer need it. Mox must be started as root, so the email receiver pod is
+not compatible with namespaces enforcing the `restricted` Pod Security
+Standard.
+
 ## Caddy Ingress Configuration
 
 Caddy is a web server that can be used as an ingress controller. When using Caddy, set the ingress configuration to use Caddy as the ingress controller. Make note of the `onDemandAsk` configuration, which is used to trigger on-demand TLS certificates. Pointed here to the health check endpoint of caddy itself to always create new certificates. On production workloads set it to the backend api endpoint to check if the domain exists in the database.
@@ -332,6 +365,22 @@ caddy:
 | `migration.containerSecurityContext.capabilities.drop`        | List of capabilities to be dropped                        | `[]`      |
 | `migration.containerSecurityContext.capabilities.add`         | List of capabilities to be added                          | `[]`      |
 | `migration.containerSecurityContext.seccompProfile.type`      | Set container's Security Context seccomp profile          | `""`      |
+
+### Baserow Inbound Email Receiver Configuration
+
+| Name                                                                   | Description                                                      | Value                                 |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------- |
+| `baserow-email-receiver.enabled`                                       | Enable the inbound email receiver.                               | `false`                               |
+| `baserow-email-receiver.image.repository`                              | Email receiver Docker image repository.                          | `backend`                             |
+| `baserow-email-receiver.terminationGracePeriodSeconds`                 | Seconds mox is given to finish in-flight deliveries on shutdown. | `60`                                  |
+| `baserow-email-receiver.persistence.size`                              | Persistent storage requested for mox data.                       | `1Gi`                                 |
+| `baserow-email-receiver.persistence.storageClass`                      | Persistent storage class.                                        | `""`                                  |
+| `baserow-email-receiver.persistence.existingClaim`                     | Existing PVC for mox data.                                       | `""`                                  |
+| `baserow-email-receiver.persistence.annotations`                       | Persistent volume claim annotations.                             | `{"helm.sh/resource-policy": "keep"}` |
+| `baserow-email-receiver.additionalServices.smtp.type`                  | SMTP service type.                                               | `LoadBalancer`                        |
+| `baserow-email-receiver.additionalServices.smtp.port`                  | Externally exposed SMTP port.                                    | `25`                                  |
+| `baserow-email-receiver.additionalServices.smtp.annotations`           | SMTP service annotations.                                        | `{}`                                  |
+| `baserow-email-receiver.additionalServices.smtp.externalTrafficPolicy` | SMTP service external traffic policy.                            | `Local`                               |
 
 ### Baserow Backend ASGI Configuration
 
